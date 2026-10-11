@@ -1,6 +1,8 @@
 use crate::{
-    collider_tree::ColliderTrees, collision::collider::contact_query,
-    environment::PhysicsEnvironment, prelude::*,
+    collider_tree::ColliderTrees,
+    collision::collider::contact_query,
+    environment::{PhysicsEnvironment, PhysicsEnvironmentLookup},
+    prelude::*,
 };
 use bevy::{ecs::system::SystemParam, prelude::*};
 use parry::query::ShapeCastOptions;
@@ -46,12 +48,12 @@ use parry::query::ShapeCastOptions;
 ///     let filter = SpatialQueryFilter::default();
 ///
 ///     // Cast ray and print first hit
-///     if let Some(first_hit) = spatial_query.cast_ray(origin, direction, max_distance, solid, &filter) {
+///     if let Some(first_hit) = spatial_query.in_environment(environment).cast_ray(origin, direction, max_distance, solid, &filter) {
 ///         println!("First hit: {:?}", first_hit);
 ///     }
 ///
 ///     // Cast ray and get up to 20 hits
-///     let hits = spatial_query.ray_hits(origin, direction, max_distance, 20, solid, &filter);
+///     let hits = spatial_query.in_environment(environment).ray_hits(origin, direction, max_distance, 20, solid, &filter);
 ///
 ///     // Print hits
 ///     for hit in hits.iter() {
@@ -64,25 +66,58 @@ pub struct SpatialQuery<'w, 's> {
     colliders: Query<'w, 's, (&'static Position, &'static Rotation, &'static Collider)>,
     aabbs: Query<'w, 's, &'static ColliderAabb>,
     collider_trees: Query<'w, 's, &'static ColliderTrees, With<PhysicsEnvironment>>,
+    environments: PhysicsEnvironmentLookup<'w, 's>,
     #[cfg(feature = "debug-plugin")]
     tracked_queries: Option<Res<'w, TrackedSpatialQueries>>,
 }
 
-impl SpatialQuery<'_, '_> {
-    /// Every tree of every [`PhysicsEnvironment`]: spatial queries see the union of all worlds.
-    /// Filter by [`CollisionLayers`] (or keep worlds spatially separated) to scope a query
-    /// to one world; a per-world query API is a future refinement.
+impl<'w, 's> SpatialQuery<'w, 's> {
+    /// Queries against one [`PhysicsEnvironment`]'s colliders, in its frame: positions and
+    /// directions are relative to it, like every [`Position`] in it. Every query names its
+    /// environment; there is no query over all of them (their frames differ).
+    pub fn in_environment(&self, environment: Entity) -> EnvironmentSpatialQuery<'_, 'w, 's> {
+        EnvironmentSpatialQuery {
+            colliders: &self.colliders,
+            aabbs: &self.aabbs,
+            trees: self.collider_trees.get(environment).ok(),
+            #[cfg(feature = "debug-plugin")]
+            tracked_queries: self.tracked_queries.as_deref(),
+        }
+    }
+
+    /// The [`PhysicsEnvironment`] `entity` is in, `None` when it is in none.
+    pub fn environment_of(&self, entity: Entity) -> Option<Entity> {
+        self.environments.environment_of(entity)
+    }
+
+    /// Queries against `entity`'s own environment, `None` when it is in none.
+    pub fn for_entity(&self, entity: Entity) -> Option<EnvironmentSpatialQuery<'_, 'w, 's>> {
+        self.environments
+            .environment_of(entity)
+            .map(|environment| self.in_environment(environment))
+    }
+}
+
+/// [`SpatialQuery`] scoped to one [`PhysicsEnvironment`] (see [`SpatialQuery::in_environment`]).
+pub struct EnvironmentSpatialQuery<'a, 'w, 's> {
+    colliders: &'a Query<'w, 's, (&'static Position, &'static Rotation, &'static Collider)>,
+    aabbs: &'a Query<'w, 's, &'static ColliderAabb>,
+    trees: Option<&'a ColliderTrees>,
+    #[cfg(feature = "debug-plugin")]
+    tracked_queries: Option<&'a TrackedSpatialQueries>,
+}
+
+impl EnvironmentSpatialQuery<'_, '_, '_> {
+    /// The environment's trees (none for an entity that is no environment).
     fn all_trees(&self) -> impl Iterator<Item = &crate::collider_tree::ColliderTree> {
-        self.collider_trees
-            .iter()
-            .flat_map(|trees| trees.iter_trees())
+        self.trees.into_iter().flat_map(|trees| trees.iter_trees())
     }
 
     /// Records a spatial query for debug rendering if tracking is enabled.
     #[cfg(feature = "debug-plugin")]
     #[inline]
     fn track(&self, query: impl FnOnce() -> TrackedSpatialQuery) {
-        if let Some(tracked_queries) = &self.tracked_queries
+        if let Some(tracked_queries) = self.tracked_queries
             && tracked_queries.enabled
         {
             tracked_queries.borrow_local_mut().push(query());
@@ -122,7 +157,7 @@ impl SpatialQuery<'_, '_> {
     ///     let filter = SpatialQueryFilter::default();
     ///
     ///     // Cast ray and print first hit
-    ///     if let Some(first_hit) = spatial_query.cast_ray(origin, direction, max_distance, solid, &filter) {
+    ///     if let Some(first_hit) = spatial_query.in_environment(environment).cast_ray(origin, direction, max_distance, solid, &filter) {
     ///         println!("First hit: {:?}", first_hit);
     ///     }
     /// }
@@ -192,7 +227,7 @@ impl SpatialQuery<'_, '_> {
     ///     let filter = SpatialQueryFilter::default();
     ///
     ///     // Cast ray and get the first hit that matches the predicate
-    ///     let hit = spatial_query.cast_ray_predicate(origin, direction, max_distance, solid, &filter, &|entity| {
+    ///     let hit = spatial_query.in_environment(environment).cast_ray_predicate(origin, direction, max_distance, solid, &filter, &|entity| {
     ///         // Skip entities with the `Invisible` component.
     ///         !query.contains(entity)
     ///     });
@@ -296,7 +331,7 @@ impl SpatialQuery<'_, '_> {
     ///     let filter = SpatialQueryFilter::default();
     ///
     ///     // Cast ray and get up to 20 hits
-    ///     let hits = spatial_query.ray_hits(origin, direction, max_distance, 20, solid, &filter);
+    ///     let hits = spatial_query.in_environment(environment).ray_hits(origin, direction, max_distance, 20, solid, &filter);
     ///
     ///     // Print hits
     ///     for hit in hits.iter() {
@@ -378,7 +413,7 @@ impl SpatialQuery<'_, '_> {
     ///
     ///     // Cast ray and get up to 20 hits
     ///     let mut hits = vec![];
-    ///     spatial_query.ray_hits_callback(origin, direction, max_distance, solid, &filter, |hit| {
+    ///     spatial_query.in_environment(environment).ray_hits_callback(origin, direction, max_distance, solid, &filter, |hit| {
     ///         hits.push(hit);
     ///         hits.len() < 20
     ///     });
@@ -474,7 +509,7 @@ impl SpatialQuery<'_, '_> {
     ///     let filter = SpatialQueryFilter::default();
     ///
     ///     // Cast shape and print first hit
-    ///     if let Some(first_hit) = spatial_query.cast_shape(&shape, origin, rotation, direction, &config, &filter)
+    ///     if let Some(first_hit) = spatial_query.in_environment(environment).cast_shape(&shape, origin, rotation, direction, &config, &filter)
     ///     {
     ///         println!("First hit: {:?}", first_hit);
     ///     }
@@ -562,7 +597,7 @@ impl SpatialQuery<'_, '_> {
     ///     let filter = SpatialQueryFilter::default();
     ///
     ///     // Cast shape and get the first hit that matches the predicate
-    ///     let hit = spatial_query.cast_shape_predicate(&shape, origin, rotation, direction, &config, &filter, &|entity| {
+    ///     let hit = spatial_query.in_environment(environment).cast_shape_predicate(&shape, origin, rotation, direction, &config, &filter, &|entity| {
     ///        // Skip entities with the `Invisible` component.
     ///        !query.contains(entity)
     ///     });
@@ -694,7 +729,7 @@ impl SpatialQuery<'_, '_> {
     ///     let filter = SpatialQueryFilter::default();
     ///
     ///     // Cast shape and get up to 20 hits
-    ///     let hits = spatial_query.shape_hits(&shape, origin, rotation, direction, 20, &config, &filter);
+    ///     let hits = spatial_query.in_environment(environment).shape_hits(&shape, origin, rotation, direction, 20, &config, &filter);
     ///
     ///     // Print hits
     ///     for hit in hits.iter() {
@@ -792,7 +827,7 @@ impl SpatialQuery<'_, '_> {
     ///
     ///     // Cast shape and get up to 20 hits
     ///     let mut hits = vec![];
-    ///     spatial_query.shape_hits_callback(&shape, origin, rotation, direction, &config, &filter, |hit| {
+    ///     spatial_query.in_environment(environment).shape_hits_callback(&shape, origin, rotation, direction, &config, &filter, |hit| {
     ///         hits.push(hit);
     ///         hits.len() < 20
     ///     });
@@ -899,7 +934,7 @@ impl SpatialQuery<'_, '_> {
     /// # #[cfg(feature = "3d")]
     /// fn print_point_projection(spatial_query: SpatialQuery) {
     ///     // Project a point and print the result
-    ///     if let Some(projection) = spatial_query.project_point(
+    ///     if let Some(projection) = spatial_query.in_environment(environment).project_point(
     ///         RVec3::ZERO,                   // Point
     ///         true,                          // Are colliders treated as "solid"
     ///         &SpatialQueryFilter::default(),// Query filter
@@ -957,7 +992,7 @@ impl SpatialQuery<'_, '_> {
     /// # #[cfg(feature = "3d")]
     /// fn print_point_projection(spatial_query: SpatialQuery, query: Query<&Invisible>) {
     ///     // Project a point and print the result
-    ///     if let Some(projection) = spatial_query.project_point_predicate(
+    ///     if let Some(projection) = spatial_query.in_environment(environment).project_point_predicate(
     ///         RVec3::ZERO,                    // Point
     ///         true,                           // Are colliders treated as "solid"
     ///         &SpatialQueryFilter::default(), // Query filter
@@ -1034,7 +1069,7 @@ impl SpatialQuery<'_, '_> {
     /// # #[cfg(feature = "3d")]
     /// fn print_point_intersections(spatial_query: SpatialQuery) {
     ///     let intersections =
-    ///         spatial_query.point_intersections(RVec3::ZERO, &SpatialQueryFilter::default());
+    ///         spatial_query.in_environment(environment).point_intersections(RVec3::ZERO, &SpatialQueryFilter::default());
     ///
     ///     for entity in intersections.iter() {
     ///         println!("Entity: {}", entity);
@@ -1079,7 +1114,7 @@ impl SpatialQuery<'_, '_> {
     /// fn print_point_intersections(spatial_query: SpatialQuery) {
     ///     let mut intersections = vec![];
     ///     
-    ///     spatial_query.point_intersections_callback(
+    ///     spatial_query.in_environment(environment).point_intersections_callback(
     ///         RVec3::ZERO,                    // Point
     ///         &SpatialQueryFilter::default(), // Query filter
     ///         |entity| {                      // Callback function
@@ -1139,7 +1174,7 @@ impl SpatialQuery<'_, '_> {
     /// # #[cfg(feature = "3d")]
     /// fn print_aabb_intersections(spatial_query: SpatialQuery) {
     ///     let aabb = Collider::sphere(0.5).aabb(RVec3::ZERO, Quat::default(), 0.0);
-    ///     let intersections = spatial_query.aabb_intersections_with_aabb(aabb);
+    ///     let intersections = spatial_query.in_environment(environment).aabb_intersections_with_aabb(aabb);
     ///
     ///     for entity in intersections.iter() {
     ///         println!("Entity: {}", entity);
@@ -1178,7 +1213,7 @@ impl SpatialQuery<'_, '_> {
     /// fn print_aabb_intersections(spatial_query: SpatialQuery) {
     ///     let mut intersections = vec![];
     ///
-    ///     spatial_query.aabb_intersections_with_aabb_callback(
+    ///     spatial_query.in_environment(environment).aabb_intersections_with_aabb_callback(
     ///         Collider::sphere(0.5).aabb(RVec3::ZERO, Quat::default(), 0.0),
     ///         |entity| {
     ///             intersections.push(entity);
@@ -1238,7 +1273,7 @@ impl SpatialQuery<'_, '_> {
     ///
     /// # #[cfg(feature = "3d")]
     /// fn print_shape_intersections(spatial_query: SpatialQuery) {
-    ///     let intersections = spatial_query.shape_intersections(
+    ///     let intersections = spatial_query.in_environment(environment).shape_intersections(
     ///         &Collider::sphere(0.5),          // Shape
     ///         RVec3::ZERO,                     // Shape position
     ///         Quat::default(),                 // Shape rotation
@@ -1312,7 +1347,7 @@ impl SpatialQuery<'_, '_> {
     /// fn print_shape_intersections(spatial_query: SpatialQuery) {
     ///     let mut intersections = vec![];
     ///
-    ///     spatial_query.shape_intersections_callback(
+    ///     spatial_query.in_environment(environment).shape_intersections_callback(
     ///         &Collider::sphere(0.5),          // Shape
     ///         RVec3::ZERO,                     // Shape position
     ///         Quat::default(),                 // Shape rotation

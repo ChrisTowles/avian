@@ -298,7 +298,7 @@ impl ShapeCaster {
         &mut self,
         caster_entity: Entity,
         hits: &mut ShapeHits,
-        spatial_query: &SpatialQuery,
+        spatial_query: &super::EnvironmentSpatialQuery,
     ) {
         if self.ignore_self {
             self.query_filter.excluded_entities.insert(caster_entity);

@@ -6,7 +6,7 @@ mod velocity_project;
 /// Re-exports common types related to character controller functionality.
 pub mod prelude {
     pub use super::move_and_slide::{
-        MoveAndSlide, MoveAndSlideConfig, MoveAndSlideHitData, MoveAndSlideHitResponse,
-        MoveAndSlideOutput,
+        EnvironmentMoveAndSlide, MoveAndSlide, MoveAndSlideConfig, MoveAndSlideHitData,
+        MoveAndSlideHitResponse, MoveAndSlideOutput,
     };
 }

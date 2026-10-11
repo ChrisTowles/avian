@@ -9,6 +9,11 @@
 //! - [Intersection tests](#intersection-tests)
 //!
 //! All spatial queries can be done using the various methods provided by the [`SpatialQuery`] system parameter.
+//! Every query is against one [`PhysicsEnvironment`](crate::environment::PhysicsEnvironment)'s
+//! colliders, in its frame: `spatial_query.in_environment(environment)` (or
+//! `spatial_query.for_entity(entity)`, the entity's own) returns the scoped queries.
+//! [`RayCaster`]s, [`ShapeCaster`]s and picking query their own entity's (the camera's)
+//! environment.
 //!
 //! Raycasting and shapecasting can also be done with a component-based approach using the [`RayCaster`] and
 //! [`ShapeCaster`] components. They enable performing casts every frame in a way that is often more convenient
@@ -404,8 +409,12 @@ fn raycast(
     let start = crate::utils::Instant::now();
 
     for (entity, mut ray_caster, mut hits) in &mut rays {
-        if ray_caster.enabled {
-            ray_caster.cast(entity, &mut hits, &spatial_query);
+        // A caster sees its own environment's colliders (in none, nothing).
+        let environment = spatial_query.for_entity(entity);
+        if ray_caster.enabled
+            && let Some(environment) = environment
+        {
+            ray_caster.cast(entity, &mut hits, &environment);
         } else if !hits.is_empty() {
             hits.clear();
         }
@@ -426,8 +435,12 @@ fn shapecast(
     let start = crate::utils::Instant::now();
 
     for (entity, mut shape_caster, mut hits) in &mut shape_casters {
-        if shape_caster.enabled {
-            shape_caster.cast(entity, &mut hits, &spatial_query);
+        // A caster sees its own environment's colliders (in none, nothing).
+        let environment = spatial_query.for_entity(entity);
+        if shape_caster.enabled
+            && let Some(environment) = environment
+        {
+            shape_caster.cast(entity, &mut hits, &environment);
         } else if !hits.is_empty() {
             hits.clear();
         }

@@ -176,6 +176,10 @@ pub fn update_hits(
         }
 
         let filter = picking_filter.unwrap_or(DEFAULT_FILTER_REF);
+        // The camera picks in its own environment.
+        let Some(spatial_query) = spatial_query.for_entity(ray_id.camera) else {
+            continue;
+        };
 
         #[cfg(feature = "2d")]
         {

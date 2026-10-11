@@ -397,12 +397,51 @@ impl MoveHitData {
 }
 
 impl<'w, 's> MoveAndSlide<'w, 's> {
-    /// The length unit its tolerances scale with. Like [`SpatialQuery`], this sees every
-    /// environment at once, so it takes their shared unit (1 when there are none).
-    fn length_unit(&self) -> f32 {
-        self.length_unit.iter().next().map_or(1.0, |unit| unit.0)
+    /// Moves and slides in one [`PhysicsEnvironment`]: against its colliders, in its frame,
+    /// with its length unit (see [`SpatialQuery::in_environment`]).
+    pub fn in_environment(&self, environment: Entity) -> EnvironmentMoveAndSlide<'_, 'w, 's> {
+        EnvironmentMoveAndSlide {
+            spatial_query: self.spatial_query.in_environment(environment),
+            colliders: &self.colliders,
+            length_unit: self.length_unit.get(environment).map_or(1.0, |unit| unit.0),
+        }
     }
 
+    /// Moves and slides in `entity`'s own environment, `None` when it is in none.
+    pub fn for_entity(&self, entity: Entity) -> Option<EnvironmentMoveAndSlide<'_, 'w, 's>> {
+        self.spatial_query
+            .environment_of(entity)
+            .map(|environment| self.in_environment(environment))
+    }
+
+    /// Projects input velocity `v` onto the planes defined by the given `normals`
+    /// (see [`EnvironmentMoveAndSlide::project_velocity`]).
+    #[must_use]
+    pub fn project_velocity(v: Vector, normals: &[Dir]) -> Vector {
+        project_velocity(v, normals)
+    }
+}
+
+/// [`MoveAndSlide`] scoped to one [`PhysicsEnvironment`] (see [`MoveAndSlide::in_environment`]).
+pub struct EnvironmentMoveAndSlide<'a, 'w, 's> {
+    /// The environment's spatial queries.
+    pub spatial_query: EnvironmentSpatialQuery<'a, 'w, 's>,
+    colliders: &'a Query<
+        'w,
+        's,
+        (
+            &'static Collider,
+            &'static Position,
+            &'static Rotation,
+            Option<&'static CollisionLayers>,
+        ),
+        (With<ColliderOf>, Without<Sensor>),
+    >,
+    /// The environment's units per meter: some thresholds and tolerances scale with it.
+    pub length_unit: f32,
+}
+
+impl EnvironmentMoveAndSlide<'_, '_, '_> {
     /// Moves a shape along a given velocity vector, sliding along any colliders that are hit on the way.
     ///
     /// See [`MoveAndSlide`] for an overview of the algorithm.
@@ -456,7 +495,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
     )]
     ///     let filter = SpatialQueryFilter::from_excluded_entities([entity]);
     ///     let mut collisions = HashSet::new();
-    ///     let out = move_and_slide.move_and_slide(
+    ///     let out = move_and_slide.in_environment(environment).move_and_slide(
     ///         collider,
     #[cfg_attr(feature = "2d", doc = "        transform.translation.xy().real(),")]
     #[cfg_attr(feature = "3d", doc = "        transform.translation.real(),")]
@@ -504,7 +543,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
 
         let mut position = shape_position;
         let mut time_left = delta_time.as_secs_f32();
-        let skin_width = self.length_unit() * config.skin_width;
+        let skin_width = self.length_unit * config.skin_width;
 
         // Initial depenetration pass
         let depenetration_offset =
@@ -695,7 +734,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
     ///     let config = MoveAndSlideConfig::default();
     ///
     ///     // Ensure that the character is not intersecting with any colliders.
-    ///     let offset = move_and_slide.depenetrate(
+    ///     let offset = move_and_slide.in_environment(environment).depenetrate(
     ///         collider,
     #[cfg_attr(feature = "2d", doc = "        transform.translation.xy().real(),")]
     #[cfg_attr(feature = "3d", doc = "        transform.translation.real(),")]
@@ -714,7 +753,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
     #[cfg_attr(feature = "3d", doc = "    transform.translation += offset;")]
     ///     let velocity = controller.velocity;
     ///
-    ///     let hit = move_and_slide.cast_move(
+    ///     let hit = move_and_slide.in_environment(environment).cast_move(
     ///         collider,
     #[cfg_attr(feature = "2d", doc = "        transform.translation.xy().real(),")]
     #[cfg_attr(feature = "3d", doc = "        transform.translation.real(),")]
@@ -851,7 +890,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
     ///     let (entity, collider, mut transform) = player.into_inner();
     ///     let filter = SpatialQueryFilter::from_excluded_entities([entity]);
     ///
-    ///     let offset = move_and_slide.depenetrate(
+    ///     let offset = move_and_slide.in_environment(environment).depenetrate(
     ///         collider,
     #[cfg_attr(feature = "2d", doc = "        transform.translation.xy().real(),")]
     #[cfg_attr(feature = "3d", doc = "        transform.translation.real(),")]
@@ -895,12 +934,12 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
             shape,
             shape_position,
             shape_rotation,
-            self.length_unit() * config.skin_width,
+            self.length_unit * config.skin_width,
             filter,
             |_, contact_point, normal| {
                 intersections.push((
                     normal,
-                    contact_point.penetration + self.length_unit() * config.skin_width,
+                    contact_point.penetration + self.length_unit * config.skin_width,
                 ));
                 true
             },
@@ -952,7 +991,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
     ///     let config = DepenetrationConfig::default();
     ///
     ///     let mut intersections = Vec::new();
-    ///     move_and_slide.intersections(
+    ///     move_and_slide.in_environment(environment).intersections(
     ///         collider,
     #[cfg_attr(feature = "2d", doc = "        transform.translation.xy().real(),")]
     #[cfg_attr(feature = "3d", doc = "        transform.translation.real(),")]
@@ -968,7 +1007,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
     ///             true
     ///         },
     ///     );
-    ///     let offset = move_and_slide.depenetrate_intersections(&config, &intersections);
+    ///     let offset = move_and_slide.in_environment(environment).depenetrate_intersections(&config, &intersections);
     #[cfg_attr(
         feature = "2d",
         doc = "    transform.translation += offset.extend(0.0);"
@@ -994,7 +1033,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
             let mut total_error = 0.0;
 
             for (normal, dist) in intersections {
-                if *dist > self.length_unit() * config.penetration_rejection_threshold {
+                if *dist > self.length_unit * config.penetration_rejection_threshold {
                     continue;
                 }
                 let error = (dist - fixup.dot(**normal)).max(0.0);
@@ -1002,7 +1041,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
                 fixup += error * **normal;
             }
 
-            if total_error < self.length_unit() * config.max_depenetration_error {
+            if total_error < self.length_unit * config.max_depenetration_error {
                 break;
             }
         }
