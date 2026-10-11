@@ -332,53 +332,31 @@ type PosToTransformFilter = (
     Or<(Changed<Position>, Changed<Rotation>)>,
 );
 
-type ParentComponents = (
-    &'static Transform,
-    Option<&'static Position>,
-    Option<&'static Rotation>,
-);
+/// Ancestors whose frame a body's [`Position`] is relative to: everything up to the nearest
+/// [`PhysicsEnvironment`], stopping at one that has a [`Position`] of its own. The same walk
+/// as [`compose_to_physics_world`], so the two directions agree exactly.
+type FrameAncestors<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Transform, Option<&'static ChildOf>, Has<PhysicsEnvironment>),
+    Without<Position>,
+>;
 
-// Filter for the parents query to avoid conflict with the mutable Transform in the main query.
-type ParentFilter = (Without<RigidBody>, Without<ApplyPosToTransform>);
-
-/// Copies [`Position`] and [`Rotation`] changes to [`Transform`].
-/// This allows users and the engine to use these components for moving and positioning bodies.
-///
-/// Nested rigid bodies move independently of each other, so the [`Transform`]s of child entities are updated
-/// based on their own and their parent's [`Position`] and [`Rotation`].
-#[cfg(feature = "2d")]
-pub fn position_to_transform(
-    mut query: Query<PosToTransformComponents, PosToTransformFilter>,
-    parents: Query<ParentComponents, (With<Children>, ParentFilter)>,
-) {
-    for (mut transform, pos, rot, parent) in &mut query {
-        if let Some(&ChildOf(parent)) = parent {
-            if let Ok((parent_transform, parent_pos, parent_rot)) = parents.get(parent) {
-                let parent_pos = parent_pos.map_or(parent_transform.translation, |pos| {
-                    pos.f32().extend(parent_transform.translation.z)
-                });
-                let parent_rot =
-                    parent_rot.map_or(parent_transform.rotation, |rot| Quat::from(*rot));
-                let parent_scale = parent_transform.scale;
-                let parent_t = Transform::from_translation(parent_pos)
-                    .with_rotation(parent_rot)
-                    .with_scale(parent_scale);
-
-                let new_transform = GlobalTransform::from(
-                    Transform::from_translation(
-                        pos.f32()
-                            .extend(parent_pos.z + transform.translation.z * parent_scale.z),
-                    )
-                    .with_rotation(Quat::from(*rot)),
-                )
-                .reparented_to(&GlobalTransform::from(parent_t));
-
-                transform.translation = new_transform.translation;
-                transform.rotation = new_transform.rotation;
-            }
-        } else {
-            transform.translation = pos.f32().extend(transform.translation.z);
-            transform.rotation = Quat::from(*rot);
+/// The ancestors' transforms a child's [`Position`] composes through, nearest first (the
+/// walk [`compose_to_physics_world`] takes past the child itself).
+fn frame_chain(child_of: Option<&ChildOf>, ancestors: &FrameAncestors, chain: &mut Vec<Transform>) {
+    chain.clear();
+    let Some(&ChildOf(mut current)) = child_of else {
+        return;
+    };
+    while let Ok((transform, child_of, is_physics_world)) = ancestors.get(current) {
+        if is_physics_world {
+            break;
+        }
+        chain.push(*transform);
+        match child_of {
+            Some(&ChildOf(next)) => current = next,
+            None => break,
         }
     }
 }
@@ -386,38 +364,57 @@ pub fn position_to_transform(
 /// Copies [`Position`] and [`Rotation`] changes to [`Transform`].
 /// This allows users and the engine to use these components for moving and positioning bodies.
 ///
-/// Nested rigid bodies move independently of each other, so the [`Transform`]s of child entities are updated
-/// based on their own and their parent's [`Position`] and [`Rotation`].
+/// The exact inverse of [`transform_to_position`]: the ancestors' transforms are undone from
+/// the outermost in, so a body under any chain of plain entities (a scene root under a placed
+/// tile, a prop under a room) lands where its [`Position`] says. Reading a parent's local
+/// `Transform` as its frame, as this once did, misplaced such bodies every tick and
+/// `transform_to_position` pulled them back the next.
+#[cfg(feature = "2d")]
+pub fn position_to_transform(
+    mut query: Query<PosToTransformComponents, PosToTransformFilter>,
+    ancestors: FrameAncestors,
+    mut chain: Local<Vec<Transform>>,
+) {
+    for (mut transform, pos, rot, child_of) in &mut query {
+        frame_chain(child_of, &ancestors, &mut chain);
+        let mut translation = pos.f32();
+        let mut rotation = Quat::from(*rot);
+        for parent in chain.iter().rev() {
+            let inv = parent.rotation.inverse();
+            translation = (inv * (translation - parent.translation.truncate()).extend(0.0))
+                .truncate()
+                / parent.scale.truncate();
+            rotation = inv * rotation;
+        }
+        transform.translation = translation.extend(transform.translation.z);
+        transform.rotation = rotation;
+    }
+}
+
+/// Copies [`Position`] and [`Rotation`] changes to [`Transform`].
+/// This allows users and the engine to use these components for moving and positioning bodies.
+///
+/// The exact inverse of [`transform_to_position`]: the ancestors' transforms are undone from
+/// the outermost in, so a body under any chain of plain entities (a scene root under a placed
+/// tile, a prop under a room) lands where its [`Position`] says. Reading a parent's local
+/// `Transform` as its frame, as this once did, misplaced such bodies every tick and
+/// `transform_to_position` pulled them back the next.
 #[cfg(feature = "3d")]
 pub fn position_to_transform(
     mut query: Query<PosToTransformComponents, PosToTransformFilter>,
-    parents: Query<ParentComponents, (With<Children>, ParentFilter)>,
+    ancestors: FrameAncestors,
+    mut chain: Local<Vec<Transform>>,
 ) {
-    for (mut transform, pos, rot, parent) in &mut query {
-        if let Some(&ChildOf(parent)) = parent {
-            if let Ok((parent_transform, parent_pos, parent_rot)) = parents.get(parent) {
-                // Compute the parent's physics-space transform using Position/Rotation if available,
-                // falling back to the parent's local Transform.
-                let parent_pos = parent_pos.map_or(parent_transform.translation, |pos| pos.f32());
-                let parent_rot =
-                    parent_rot.map_or(parent_transform.rotation, |rot| Quat::from(*rot));
-                let parent_scale = parent_transform.scale;
-                let parent_t = Transform::from_translation(parent_pos)
-                    .with_rotation(parent_rot)
-                    .with_scale(parent_scale);
-
-                // Compute local transform: inverse(parent) * child_global
-                let new_transform = GlobalTransform::from(
-                    Transform::from_translation(pos.f32()).with_rotation(rot.0),
-                )
-                .reparented_to(&GlobalTransform::from(parent_t));
-
-                transform.translation = new_transform.translation;
-                transform.rotation = new_transform.rotation;
-            }
-        } else {
-            transform.translation = pos.f32();
-            transform.rotation = rot.0;
+    for (mut transform, pos, rot, child_of) in &mut query {
+        frame_chain(child_of, &ancestors, &mut chain);
+        let mut translation = pos.f32();
+        let mut rotation = rot.0;
+        for parent in chain.iter().rev() {
+            let inv = parent.rotation.inverse();
+            translation = (inv * (translation - parent.translation)) / parent.scale;
+            rotation = inv * rotation;
         }
+        transform.translation = translation;
+        transform.rotation = rotation;
     }
 }
