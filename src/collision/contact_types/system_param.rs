@@ -1,7 +1,4 @@
-use crate::{
-    data_structures::pair_key::PairKey,
-    environment::{MainPhysicsEnvironmentEntity, PhysicsEnvironment},
-};
+use crate::{data_structures::pair_key::PairKey, environment::PhysicsEnvironment};
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use super::{ContactGraph, ContactPair};
@@ -54,38 +51,39 @@ use super::{ContactGraph, ContactPair};
 /// [`CollisionHooks`]: crate::collision::hooks::CollisionHooks
 #[derive(SystemParam)]
 pub struct Collisions<'w, 's> {
-    /// The [`ContactGraph`] that stores all contact edges.
-    contact_graph: Query<'w, 's, &'static mut ContactGraph, With<PhysicsEnvironment>>,
-    main_world: Res<'w, MainPhysicsEnvironmentEntity>,
+    /// Every environment's [`ContactGraph`]: contacts never cross environments, so the touching
+    /// pairs are the union of theirs.
+    contact_graphs: Query<'w, 's, &'static ContactGraph, With<PhysicsEnvironment>>,
 }
 
 impl Collisions<'_, '_> {
-    fn contact_graph(&self) -> &ContactGraph {
-        self.contact_graph.get(self.main_world.0).unwrap()
-    }
-
-    /// Returns a reference to the internal [`ContactGraph`].
+    /// The internal [`ContactGraph`] of every environment.
     ///
     /// Note that unlike [`Collisions`], which only provides touching contacts,
-    /// the contact graph includes both touching and non-touching contacts.
+    /// the contact graphs include both touching and non-touching contacts.
     #[inline]
-    pub fn graph(&self) -> &ContactGraph {
-        self.contact_graph()
+    pub fn graphs(&self) -> impl Iterator<Item = &ContactGraph> {
+        self.contact_graphs.iter()
+    }
+
+    /// The [`ContactGraph`] of one environment.
+    #[inline]
+    pub fn graph(&self, environment: Entity) -> Option<&ContactGraph> {
+        self.contact_graphs.get(environment).ok()
     }
 
     /// Returns a touching contact pair between two entities.
     /// If the pair does not exist, `None` is returned.
     #[inline]
     pub fn get(&self, entity1: Entity, entity2: Entity) -> Option<&ContactPair> {
-        self.contact_graph()
-            .get(entity1, entity2)
-            .map(|(_edge, pair)| pair)
+        self.graphs()
+            .find_map(|graph| graph.get(entity1, entity2).map(|(_edge, pair)| pair))
     }
 
     /// Returns `true` if the given entities have a touching contact pair.
     #[inline]
     pub fn contains(&self, entity1: Entity, entity2: Entity) -> bool {
-        self.contact_graph().contains(entity1, entity2)
+        self.graphs().any(|graph| graph.contains(entity1, entity2))
     }
 
     /// Returns `true` if the given pair key matches a touching contact pair.
@@ -96,25 +94,28 @@ impl Collisions<'_, '_> {
     /// If the key is not available, consider using [`contains`](Self::contains) instead.
     #[inline]
     pub fn contains_key(&self, pair_key: &PairKey) -> bool {
-        self.contact_graph().contains_key(pair_key)
+        self.graphs().any(|graph| graph.contains_key(pair_key))
     }
 
     /// Returns an iterator yielding immutable access to all touching contact pairs.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &ContactPair> {
-        let graph = self.contact_graph();
-        graph
-            .iter_active_touching()
-            .chain(graph.iter_sleeping_touching())
+        self.graphs().flat_map(|graph| {
+            graph
+                .iter_active_touching()
+                .chain(graph.iter_sleeping_touching())
+        })
     }
 
     /// Returns an iterator yielding immutable access to all touching contact pairs
     /// involving the given entity.
     #[inline]
     pub fn collisions_with(&self, entity: Entity) -> impl Iterator<Item = &ContactPair> {
-        self.contact_graph()
-            .contact_pairs_with(entity)
-            .filter(|contact_pair| contact_pair.is_touching())
+        self.graphs().flat_map(move |graph| {
+            graph
+                .contact_pairs_with(entity)
+                .filter(|contact_pair| contact_pair.is_touching())
+        })
     }
 
     /// Returns an iterator yielding immutable access to all entities

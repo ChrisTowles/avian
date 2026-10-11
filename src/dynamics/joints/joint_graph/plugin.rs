@@ -148,7 +148,9 @@ fn add_joint_to_graph<
     let [body1, body2] = joint.entities();
 
     // Add the joint to the graph of the world the first body lives in.
-    let world_entity = world_lookup.environment_of(body1);
+    let Some(world_entity) = world_lookup.environment_of(body1) else {
+        return;
+    };
     let Ok(mut joint_graph) = worlds.get_mut(world_entity) else {
         return;
     };
@@ -167,17 +169,18 @@ fn add_joint_to_graph<
 
 fn remove_joint_from_graph<E: EventPattern<Event: EntityEvent>>(
     trigger: On<E>,
-    mut worlds: Query<&mut JointGraph, With<crate::environment::PhysicsEnvironment>>,
-    world_lookup: crate::environment::PhysicsEnvironmentLookup,
+    mut worlds: Query<(Entity, &mut JointGraph), With<crate::environment::PhysicsEnvironment>>,
     mut joint_graph_changes: MessageWriter<JointGraphChange>,
     #[cfg(feature = "xpbd_joints")] mut commands: Commands,
 ) {
     let entity = trigger.event_target();
 
-    // The joint lives in the graph of its own world (joints between worlds are not
-    // supported).
-    let world_entity = world_lookup.environment_of(entity);
-    let Ok(mut joint_graph) = worlds.get_mut(world_entity) else {
+    // The joint lives in the graph of its first body's environment (joints between
+    // environments are not supported), wherever the joint entity itself sits.
+    let Some((world_entity, mut joint_graph)) = worlds
+        .iter_mut()
+        .find(|(_, graph)| graph.get(entity).is_some())
+    else {
         return;
     };
     let Some(joint) = joint_graph.get(entity) else {
@@ -266,8 +269,9 @@ fn on_disable_joint_collision(
     world_lookup: crate::environment::PhysicsEnvironmentLookup,
 ) {
     let entity = trigger.entity;
-    let Ok((joint_graph, mut contact_graph, mut contact_status_changes)) =
-        worlds.get_mut(world_lookup.environment_of(entity))
+    let Some((joint_graph, mut contact_graph, mut contact_status_changes)) = world_lookup
+        .environment_of(entity)
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };
@@ -319,15 +323,16 @@ fn on_disable_joint_collision(
 /// Update the joint graph when the entities of a joint change.
 fn on_change_joint_entities<T: Component + EntityConstraint<2>>(
     query: Query<(Entity, &T), Changed<T>>,
-    mut worlds: Query<&mut JointGraph, With<crate::environment::PhysicsEnvironment>>,
-    world_lookup: crate::environment::PhysicsEnvironmentLookup,
+    mut worlds: Query<(Entity, &mut JointGraph), With<crate::environment::PhysicsEnvironment>>,
     mut joint_graph_changes: MessageWriter<JointGraphChange>,
     #[cfg(feature = "xpbd_joints")] mut commands: Commands,
 ) {
     for (entity, joint) in &query {
         let [body1, body2] = joint.entities();
-        let world_entity = world_lookup.environment_of(entity);
-        let Ok(mut joint_graph) = worlds.get_mut(world_entity) else {
+        let Some((world_entity, mut joint_graph)) = worlds
+            .iter_mut()
+            .find(|(_, graph)| graph.get(entity).is_some())
+        else {
             continue;
         };
         let Some(old_edge) = joint_graph.get(entity) else {

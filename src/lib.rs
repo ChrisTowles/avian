@@ -578,9 +578,8 @@ pub mod prelude {
         collision::prelude::*,
         dynamics::{self, prelude::*},
         environment::{
-            EnvironmentTransferred, MainPhysicsEnvironment, MainPhysicsEnvironmentEntity,
-            PhysicsEnvironment, PhysicsEnvironmentLookup, PhysicsEnvironmentPlugin,
-            TransferToEnvironment,
+            EnvironmentTransferred, PhysicsEnvironment, PhysicsEnvironmentLookup,
+            PhysicsEnvironmentPlugin, TransferToEnvironment,
         },
         interpolation::*,
         physics_transform::{PhysicsTransformHelper, PhysicsTransformPlugin, Position, Rotation},
@@ -608,21 +607,6 @@ mod utils;
 
 #[cfg(test)]
 mod tests;
-
-/// Test helper: set a per-world config component (`Gravity`, `SubstepCount`, …) on the
-/// auto-spawned [`MainPhysicsEnvironment`](crate::environment::MainPhysicsEnvironment) entity. Replaces the
-/// old `insert_resource` calls now that physics config lives on the world entity.
-#[cfg(test)]
-pub(crate) fn set_main_world_component<T: bevy::prelude::Component>(
-    app: &mut bevy::prelude::App,
-    value: T,
-) {
-    let entity = app
-        .world()
-        .resource::<crate::environment::MainPhysicsEnvironmentEntity>()
-        .0;
-    app.world_mut().entity_mut(entity).insert(value);
-}
 
 use bevy::{
     app::PluginGroupBuilder,

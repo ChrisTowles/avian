@@ -3,12 +3,10 @@
 //! A [`PhysicsEnvironment`] entity holds all per-environment physics state as components
 //! (e.g. [`Gravity`], [`SolverConfig`], [`ColliderTrees`]).
 //!
-//! The [`MainPhysicsEnvironment`] marker identifies the default environment,
-//! spawned automatically by [`PhysicsEnvironmentPlugin`].
-//!
 //! Physics entities are assigned to an environment by being descendants of a
-//! [`PhysicsEnvironment`] entity in the hierarchy. Entities without a
-//! [`PhysicsEnvironment`] ancestor fall back to the [`MainPhysicsEnvironment`].
+//! [`PhysicsEnvironment`] entity in the hierarchy, and every one must have such an ancestor:
+//! there is no default environment. One without is an error (logged once) and is not
+//! simulated. The environment is also the frame: [`Position`] is relative to it.
 
 use bevy::{
     ecs::{relationship::Relationship, system::SystemParam, world::DeferredWorld},
@@ -95,16 +93,6 @@ use crate::{
 )]
 pub struct PhysicsEnvironment;
 
-/// Marker component for the default physics environment.
-#[derive(Component, Default, Reflect)]
-#[reflect(Component, Default)]
-#[require(PhysicsEnvironment)]
-pub struct MainPhysicsEnvironment;
-
-/// Resource holding the entity ID of the [`MainPhysicsEnvironment`].
-#[derive(Resource, Deref)]
-pub struct MainPhysicsEnvironmentEntity(pub Entity);
-
 // --- Cached physics environment assignment ---
 
 /// A cached reference to the [`PhysicsEnvironment`] entity that a physics entity belongs to.
@@ -144,52 +132,44 @@ pub fn find_physics_environment_in_hierarchy(
     }
 }
 
-/// Finds the [`PhysicsEnvironment`] entity for the given entity, falling back to
-/// [`MainPhysicsEnvironmentEntity`].
-///
-/// Checks the [`PhysicsEnvironmentEntity`] cache first. Works in [`DeferredWorld`] (hooks).
-pub fn find_physics_environment_or_main(world: &DeferredWorld, entity: Entity) -> Entity {
-    find_physics_environment_in_hierarchy(world, entity)
-        .unwrap_or_else(|| world.resource::<MainPhysicsEnvironmentEntity>().0)
+/// Logs a physics entity that has no [`PhysicsEnvironment`] ancestor: it is not simulated.
+/// Called once, where its physics state would have been created.
+pub(crate) fn report_missing_environment(world: &DeferredWorld, entity: Entity, what: &str) {
+    let name = world
+        .get::<Name>(entity)
+        .map_or_else(|| "unnamed".to_string(), |name| name.as_str().to_string());
+    error!(
+        "{what} {entity} ({name}) is in no PhysicsEnvironment: spawn it under one; it is not simulated"
+    );
 }
 
-/// A [`SystemParam`] that resolves which [`PhysicsEnvironment`] entity a given entity belongs to.
-///
-/// Walks up the hierarchy via [`ChildOf`] to find the nearest [`PhysicsEnvironment`] ancestor.
-/// Falls back to [`MainPhysicsEnvironmentEntity`] for entities without a `PhysicsEnvironment` ancestor.
+/// A [`SystemParam`] that resolves which [`PhysicsEnvironment`] entity a given entity belongs to:
+/// its nearest [`PhysicsEnvironment`] ancestor, or `None` (it is then not simulated).
 #[derive(SystemParam)]
 pub struct PhysicsEnvironmentLookup<'w, 's> {
     cache: Query<'w, 's, &'static PhysicsEnvironmentEntity>,
     parents: Query<'w, 's, &'static ChildOf>,
     worlds: Query<'w, 's, (), With<PhysicsEnvironment>>,
-    main_world: Res<'w, MainPhysicsEnvironmentEntity>,
 }
 
 impl PhysicsEnvironmentLookup<'_, '_> {
-    /// Returns the [`MainPhysicsEnvironmentEntity`], useful when any environment's config will do.
-    pub fn any_environment(&self) -> Entity {
-        self.main_world.0
-    }
-
-    /// Returns the [`PhysicsEnvironment`] entity for the given entity.
+    /// Returns the [`PhysicsEnvironment`] entity for the given entity, `None` when it has no
+    /// environment ancestor.
     ///
     /// Uses the [`PhysicsEnvironmentEntity`] cache if present (O(1)),
     /// otherwise walks up the [`ChildOf`] hierarchy.
-    pub fn environment_of(&self, entity: Entity) -> Entity {
+    pub fn environment_of(&self, entity: Entity) -> Option<Entity> {
         // Fast path: cached environment assignment.
         if let Ok(cached) = self.cache.get(entity) {
-            return cached.0;
+            return Some(cached.0);
         }
         // Slow path: walk hierarchy.
         let mut current = entity;
         loop {
             if self.worlds.contains(current) {
-                return current;
+                return Some(current);
             }
-            match self.parents.get(current) {
-                Ok(child_of) => current = child_of.get(),
-                Err(_) => return self.main_world.0,
-            }
+            current = self.parents.get(current).ok()?.get();
         }
     }
 }
@@ -280,7 +260,6 @@ struct TransferParams<'w, 's> {
     world_cache: Query<'w, 's, &'static mut PhysicsEnvironmentEntity>,
     parents: Query<'w, 's, &'static ChildOf>,
     physics_worlds: Query<'w, 's, (), With<PhysicsEnvironment>>,
-    main_world: Res<'w, MainPhysicsEnvironmentEntity>,
     world_state: Query<
         'w,
         's,
@@ -315,26 +294,26 @@ struct TransferParams<'w, 's> {
 
 impl TransferParams<'_, '_> {
     // Cached environment, falling back to a hierarchy walk.
-    fn current_world(&self, entity: Entity) -> Entity {
+    fn current_world(&self, entity: Entity) -> Option<Entity> {
         if let Ok(cached) = self.world_cache.get(entity) {
-            return cached.0;
+            return Some(cached.0);
         }
         let mut current = entity;
         loop {
             if self.physics_worlds.contains(current) {
-                return current;
+                return Some(current);
             }
-            match self.parents.get(current) {
-                Ok(child_of) => current = child_of.get(),
-                Err(_) => return self.main_world.0,
-            }
+            current = self.parents.get(current).ok()?.get();
         }
     }
 }
 
 fn on_transfer_to_environment(trigger: On<TransferToEnvironment>, mut p: TransferParams) {
     let entity = trigger.event_target();
-    let from = p.current_world(entity);
+    let Some(from) = p.current_world(entity) else {
+        error!("TransferToEnvironment: {entity} is in no PhysicsEnvironment to transfer from");
+        return;
+    };
     transfer(&mut p, entity, from, trigger.event().world, true);
 }
 
@@ -666,23 +645,31 @@ fn queue_rehome(entity: Entity, mut pending: ResMut<PendingRehome>, mut commands
 fn drain_rehome(world: &mut World) {
     let roots = core::mem::take(&mut world.resource_mut::<PendingRehome>().0);
     let mut worlds = world.query_filtered::<(Entity, &ColliderTrees), With<PhysicsEnvironment>>();
-    let main = world.resource::<MainPhysicsEnvironmentEntity>().0;
     worlds.update_archetypes(world);
     let mut seen = bevy::ecs::entity::EntityHashSet::default();
     let mut moves = Vec::new();
+    // Physics entities that were in no environment and now are: created again, so their
+    // hooks give them an island / a collider proxy in it.
+    let mut adopt = Vec::new();
     for root in roots {
         if world.get_entity(root).is_err() || world.get::<PhysicsEnvironment>(root).is_some() {
             continue;
         }
-        let mut stack = vec![(root, hierarchy_world(world, root, main))];
+        // Moved out of every environment: its physics state stays where it was (and is
+        // reported where it is created next); only moves between environments rehome.
+        let Some(target) = hierarchy_world(world, root) else {
+            continue;
+        };
+        let mut stack = vec![(root, target)];
         while let Some((entity, target)) = stack.pop() {
             if !seen.insert(entity) || world.get::<PhysicsEnvironment>(entity).is_some() {
                 continue;
             }
-            if let Some(from) = physics_home(world, &mut worlds, entity)
-                && from != target
-            {
-                moves.push((entity, from, target));
+            match physics_home(world, &mut worlds, entity) {
+                Some(from) if from != target => moves.push((entity, from, target)),
+                Some(_) => {}
+                None if is_orphan(world, entity) => adopt.push(entity),
+                None => {}
             }
             if let Some(children) = world.get::<Children>(entity) {
                 stack.extend(children.iter().map(|child| (child, target)));
@@ -692,18 +679,37 @@ fn drain_rehome(world: &mut World) {
     for (entity, from, to) in moves {
         world.trigger(RehomeToEnvironment { entity, from, to });
     }
+    for entity in adopt {
+        let mut entity = world.entity_mut(entity);
+        if entity.contains::<BodyIslandNode>() {
+            entity.remove::<BodyIslandNode>();
+            entity.insert(BodyIslandNode::default());
+        }
+        if let Some(of) = entity.get::<ColliderOf>().copied() {
+            entity.insert(of);
+        }
+    }
 }
 
-fn hierarchy_world(world: &World, entity: Entity, main: Entity) -> Entity {
+// Physics state that was never created because the entity had no environment: a body with
+// no environment cached, or a collider with no proxy.
+fn is_orphan(world: &World, entity: Entity) -> bool {
+    let body = world.get::<BodyIslandNode>(entity).is_some()
+        && world.get::<PhysicsEnvironmentEntity>(entity).is_none();
+    let collider = world
+        .get::<ColliderTreeProxyKey>(entity)
+        .is_some_and(|key| *key == ColliderTreeProxyKey::PLACEHOLDER)
+        && world.get::<ColliderOf>(entity).is_some();
+    body || collider
+}
+
+fn hierarchy_world(world: &World, entity: Entity) -> Option<Entity> {
     let mut current = entity;
     loop {
         if world.get::<PhysicsEnvironment>(current).is_some() {
-            return current;
+            return Some(current);
         }
-        match world.get::<ChildOf>(current) {
-            Some(child_of) => current = child_of.get(),
-            None => return main,
-        }
+        current = world.get::<ChildOf>(current)?.get();
     }
 }
 
@@ -737,13 +743,13 @@ fn physics_home(
         .map(|(world_entity, _)| world_entity)
 }
 
-/// Plugin that spawns the [`MainPhysicsEnvironment`] entity and registers transfer handling.
+/// Plugin that registers environment types and transfer handling. It spawns no environment:
+/// the app spawns its own, and every physics entity goes under one.
 pub struct PhysicsEnvironmentPlugin;
 
 /// An environment and the settings it carries, for reflection: scenes save and editors show them.
 pub fn register_environment_types(app: &mut App) {
     app.register_type::<PhysicsEnvironment>()
-        .register_type::<MainPhysicsEnvironment>()
         .register_type::<Gravity>()
         .register_type::<PhysicsLengthUnit>()
         .register_type::<SolverConfig>()
@@ -755,9 +761,6 @@ pub fn register_environment_types(app: &mut App) {
 }
 
 impl Plugin for PhysicsEnvironmentPlugin {
-    // Spawn the main environment in `build`: tests and apps expect `MainPhysicsEnvironmentEntity`
-    // right after the plugins are added. (The solari branch spawned in `finish` for its
-    // late `register_required_components` on PhysicsEnvironment; nothing here needs that.)
     fn build(&self, app: &mut App) {
         register_environment_types(app);
         // Register the transfer observer.
@@ -778,8 +781,5 @@ impl Plugin for PhysicsEnvironmentPlugin {
                     queue_rehome(trigger.entity, pending, commands);
                 },
             );
-
-        let entity = app.world_mut().spawn(MainPhysicsEnvironment).id();
-        app.insert_resource(MainPhysicsEnvironmentEntity(entity));
     }
 }

@@ -1,9 +1,6 @@
 use bevy::{diagnostic::DiagnosticPath, prelude::*};
 
-use crate::{
-    ColliderMarker, MainPhysicsEnvironmentEntity, PhysicsSchedule, PhysicsStepSystems, RigidBody,
-    dynamics::joints::*,
-};
+use crate::{ColliderMarker, PhysicsSchedule, PhysicsStepSystems, RigidBody, dynamics::joints::*};
 
 use super::{AppDiagnosticsExt, PhysicsDiagnostics, impl_diagnostic_paths};
 
@@ -70,11 +67,8 @@ fn diagnostic_entity_counts(
     revolute_joint_query: Query<&RevoluteJoint>,
     #[cfg(feature = "3d")] spherical_joint_query: Query<&SphericalJoint>,
     mut worlds: Query<&mut PhysicsEntityDiagnostics, With<crate::environment::PhysicsEnvironment>>,
-    main_world: Res<MainPhysicsEnvironmentEntity>,
 ) {
-    let Ok(mut diagnostics) = worlds.get_mut(main_world.0) else {
-        return;
-    };
+    // Counted over the whole app and shown on every environment.
     // Count the body types in a single pass.
     let (mut dynamic, mut kinematic, mut static_) = (0, 0, 0);
     for rb in &rigid_bodies_query {
@@ -84,18 +78,22 @@ fn diagnostic_entity_counts(
             RigidBody::Static => static_ += 1,
         }
     }
-    diagnostics.dynamic_body_count = dynamic;
-    diagnostics.kinematic_body_count = kinematic;
-    diagnostics.static_body_count = static_;
-
     // These are archetypal queries, so counting them does not iterate the entities.
-    diagnostics.collider_count = colliders_query.count() as u32;
-    diagnostics.joint_count = fixed_joint_query.count() as u32
+    let colliders = colliders_query.count() as u32;
+    #[allow(unused_mut)]
+    let mut joints = fixed_joint_query.count() as u32
         + prismatic_joint_query.count() as u32
         + distance_joint_query.count() as u32
         + revolute_joint_query.count() as u32;
     #[cfg(feature = "3d")]
     {
-        diagnostics.joint_count += spherical_joint_query.count() as u32;
+        joints += spherical_joint_query.count() as u32;
+    }
+    for mut diagnostics in &mut worlds {
+        diagnostics.dynamic_body_count = dynamic;
+        diagnostics.kinematic_body_count = kinematic;
+        diagnostics.static_body_count = static_;
+        diagnostics.collider_count = colliders;
+        diagnostics.joint_count = joints;
     }
 }

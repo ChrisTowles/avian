@@ -86,7 +86,6 @@ pub struct MoveAndSlide<'w, 's> {
     /// A units-per-meter scaling factor that adjusts some thresholds and tolerances
     /// to the scale of the world for better behavior.
     pub length_unit: Query<'w, 's, &'static PhysicsLengthUnit, With<PhysicsEnvironment>>,
-    main_world: Res<'w, MainPhysicsEnvironmentEntity>,
 }
 
 /// Configuration for [`MoveAndSlide::move_and_slide`].
@@ -398,6 +397,12 @@ impl MoveHitData {
 }
 
 impl<'w, 's> MoveAndSlide<'w, 's> {
+    /// The length unit its tolerances scale with. Like [`SpatialQuery`], this sees every
+    /// environment at once, so it takes their shared unit (1 when there are none).
+    fn length_unit(&self) -> f32 {
+        self.length_unit.iter().next().map_or(1.0, |unit| unit.0)
+    }
+
     /// Moves a shape along a given velocity vector, sliding along any colliders that are hit on the way.
     ///
     /// See [`MoveAndSlide`] for an overview of the algorithm.
@@ -499,7 +504,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
 
         let mut position = shape_position;
         let mut time_left = delta_time.as_secs_f32();
-        let skin_width = self.length_unit.get(self.main_world.0).unwrap().0 * config.skin_width;
+        let skin_width = self.length_unit() * config.skin_width;
 
         // Initial depenetration pass
         let depenetration_offset =
@@ -890,13 +895,12 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
             shape,
             shape_position,
             shape_rotation,
-            self.length_unit.get(self.main_world.0).unwrap().0 * config.skin_width,
+            self.length_unit() * config.skin_width,
             filter,
             |_, contact_point, normal| {
                 intersections.push((
                     normal,
-                    contact_point.penetration
-                        + self.length_unit.get(self.main_world.0).unwrap().0 * config.skin_width,
+                    contact_point.penetration + self.length_unit() * config.skin_width,
                 ));
                 true
             },
@@ -990,10 +994,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
             let mut total_error = 0.0;
 
             for (normal, dist) in intersections {
-                if *dist
-                    > self.length_unit.get(self.main_world.0).unwrap().0
-                        * config.penetration_rejection_threshold
-                {
+                if *dist > self.length_unit() * config.penetration_rejection_threshold {
                     continue;
                 }
                 let error = (dist - fixup.dot(**normal)).max(0.0);
@@ -1001,10 +1002,7 @@ impl<'w, 's> MoveAndSlide<'w, 's> {
                 fixup += error * **normal;
             }
 
-            if total_error
-                < self.length_unit.get(self.main_world.0).unwrap().0
-                    * config.max_depenetration_error
-            {
+            if total_error < self.length_unit() * config.max_depenetration_error {
                 break;
             }
         }

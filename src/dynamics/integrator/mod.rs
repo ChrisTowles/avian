@@ -280,7 +280,7 @@ pub fn pre_process_velocity_increments(
         for (entity, rb, mut integration, lin_damping, ang_damping, gravity_scale, locked_axes) in
             bodies.iter_mut()
         {
-            if world_lookup.environment_of(entity) != world_entity || !rb.is_dynamic() {
+            if world_lookup.environment_of(entity) != Some(world_entity) || !rb.is_dynamic() {
                 continue;
             }
 

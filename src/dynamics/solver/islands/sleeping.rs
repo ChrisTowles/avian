@@ -35,24 +35,23 @@ use crate::{
             solver_body::{SolverBodies, SolverBodyIndex},
         },
     },
-    environment::MainPhysicsEnvironmentEntity,
     prelude::*,
     schedule::{LastPhysicsTick, is_changed_after_tick},
 };
 use bevy::prelude::ChildOf;
 
-/// Walks up the hierarchy from `entity` to find the nearest `PhysicsEnvironment` ancestor,
-/// falling back to the `MainPhysicsEnvironmentEntity` resource. Works with `&World`.
-fn find_physics_world_or_main_in_world(world: &World, entity: Entity) -> Entity {
+/// The environment a body is simulated in: its cached one, else its nearest
+/// `PhysicsEnvironment` ancestor; `None` when it is in no environment. Works with `&World`.
+fn find_physics_world_in_world(world: &World, entity: Entity) -> Option<Entity> {
+    if let Some(cached) = world.get::<crate::environment::PhysicsEnvironmentEntity>(entity) {
+        return Some(cached.0);
+    }
     let mut current = entity;
     loop {
         if world.get::<PhysicsEnvironment>(current).is_some() {
-            return current;
+            return Some(current);
         }
-        match world.get::<ChildOf>(current) {
-            Some(child_of) => current = child_of.get(),
-            None => return world.resource::<MainPhysicsEnvironmentEntity>().0,
-        }
+        current = world.get::<ChildOf>(current)?.get();
     }
 }
 
@@ -159,7 +158,9 @@ fn wake_on_replace_rigid_body(
     let Ok(body_island) = query.get(trigger.entity) else {
         return;
     };
-    let world_entity = world_lookup.environment_of(trigger.entity);
+    let Some(world_entity) = world_lookup.environment_of(trigger.entity) else {
+        return;
+    };
     commands.queue(WakeIslands {
         world_entity,
         islands: vec![body_island.island_id],
@@ -178,7 +179,9 @@ fn wake_on_enable_rigid_body(
     let Ok((body_island, mut sleep_timer, is_sleeping)) = query.get_mut(trigger.entity) else {
         return;
     };
-    let world_entity = world_lookup.environment_of(trigger.entity);
+    let Some(world_entity) = world_lookup.environment_of(trigger.entity) else {
+        return;
+    };
 
     if is_sleeping {
         commands.entity(trigger.entity).try_remove::<Sleeping>();
@@ -217,7 +220,7 @@ fn wake_islands_with_sleeping_disabled(
         };
         // Wake up all islands that have a body with `SleepingDisabled`.
         for (entity, body_island, mut sleep_timer) in &mut query {
-            if world_lookup.environment_of(entity) != world_entity {
+            if world_lookup.environment_of(entity) != Some(world_entity) {
                 continue;
             }
             awake_island_bit_vec.set_and_grow(body_island.island_id.0 as usize);
@@ -269,7 +272,7 @@ fn update_sleeping_states(
 
         // TODO: This would be nice to do in parallel.
         for (entity, mut sleep_timer, sleep_threshold, index, island_data) in query.iter_mut() {
-            if world_lookup.environment_of(entity) != world_entity {
+            if world_lookup.environment_of(entity) != Some(world_entity) {
                 continue;
             }
             let Some(solver_body) = solver_bodies.get(*index) else {
@@ -396,7 +399,10 @@ impl Command for SleepBody {
     fn apply(self, world: &mut World) -> Result {
         if let Ok(entity) = world.get_entity(self.0) {
             if let Some(island_id) = entity.get::<BodyIslandNode>().map(|node| node.island_id) {
-                let world_entity = find_physics_world_or_main_in_world(world, self.0);
+                // In no environment: not simulated, so nothing to put to sleep.
+                let Some(world_entity) = find_physics_world_in_world(world, self.0) else {
+                    return Ok(());
+                };
                 world.try_resource_scope(|world, mut state: Mut<CachedBodySleepingSystemState>| {
                     let (
                         mut body_islands,
@@ -584,7 +590,10 @@ impl Command for WakeBody {
             .and_then(|e| e.get::<BodyIslandNode>().map(|node| node.island_id));
 
         if let Some(island_id) = island_id {
-            let world_entity = find_physics_world_or_main_in_world(world, self.0);
+            // In no environment: not simulated, so nothing to wake.
+            let Some(world_entity) = find_physics_world_in_world(world, self.0) else {
+                return Ok(());
+            };
             (WakeIslands {
                 world_entity,
                 islands: vec![island_id],
@@ -751,7 +760,7 @@ fn wake_on_changed(
         };
 
         for (entity, pos, rot, lin_vel, ang_vel, sleep_timer, body_island) in &query.p0() {
-            if world_lookup.environment_of(entity) != world_entity {
+            if world_lookup.environment_of(entity) != Some(world_entity) {
                 continue;
             }
             if is_changed_after_tick(pos, last_physics_tick.0, this_run)
@@ -765,7 +774,7 @@ fn wake_on_changed(
         }
 
         for (entity, body_island) in &query.p1() {
-            if world_lookup.environment_of(entity) != world_entity {
+            if world_lookup.environment_of(entity) != Some(world_entity) {
                 continue;
             }
             awake_island_bit_vec.set_and_grow(body_island.island_id.0 as usize);

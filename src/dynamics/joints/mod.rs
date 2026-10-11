@@ -234,10 +234,7 @@ pub use revolute::RevoluteJoint;
 pub use spherical::SphericalJoint;
 
 use crate::{dynamics::joints::joint_graph::JointGraph, prelude::*};
-use bevy::{
-    ecs::{entity::MapEntities, lifecycle::HookContext, world::DeferredWorld},
-    prelude::*,
-};
+use bevy::{ecs::entity::MapEntities, prelude::*};
 
 #[cfg(feature = "3d")]
 use core::f32::consts::{PI, TAU};
@@ -250,6 +247,16 @@ pub struct JointPlugin;
 
 impl Plugin for JointPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(
+            |trigger: On<Add<JointCollisionDisabled>>, mut graphs: Query<&mut JointGraph>| {
+                set_joint_collision_disabled(trigger.entity, true, &mut graphs);
+            },
+        )
+        .add_observer(
+            |trigger: On<Remove<JointCollisionDisabled>>, mut graphs: Query<&mut JointGraph>| {
+                set_joint_collision_disabled(trigger.entity, false, &mut graphs);
+            },
+        );
         app.add_plugins((
             fixed::plugin,
             distance::plugin,
@@ -553,31 +560,19 @@ pub struct JointDisabled;
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
 #[reflect(Component, Debug, PartialEq)]
-#[component(on_add = JointCollisionDisabled::on_add, on_remove = JointCollisionDisabled::on_remove)]
 pub struct JointCollisionDisabled;
 
-// TODO: Turn these into observers.
-impl JointCollisionDisabled {
-    fn on_add(mut world: DeferredWorld, ctx: HookContext) {
-        let entity = ctx.entity;
-
-        // Update the `contacts_enabled` property of the joint edge.
-        // Note: The `JointGraphPlugin` handles the removal of contacts between the bodies.
-        let world_entity = world.resource::<MainPhysicsEnvironmentEntity>().0;
-        let mut joint_graph = world.get_mut::<JointGraph>(world_entity).unwrap();
-        if let Some(joint_edge) = joint_graph.get_mut(entity) {
-            joint_edge.collision_disabled = true;
-        }
-    }
-
-    fn on_remove(mut world: DeferredWorld, ctx: HookContext) {
-        let entity = ctx.entity;
-
-        // Update the `contacts_enabled` property of the joint edge.
-        let world_entity = world.resource::<MainPhysicsEnvironmentEntity>().0;
-        let mut joint_graph = world.get_mut::<JointGraph>(world_entity).unwrap();
-        if let Some(joint_edge) = joint_graph.get_mut(entity) {
-            joint_edge.collision_disabled = false;
+// Mark the joint's edge, in whichever environment's graph holds it.
+// Note: The `JointGraphPlugin` handles the removal of contacts between the bodies.
+fn set_joint_collision_disabled(
+    entity: Entity,
+    disabled: bool,
+    graphs: &mut Query<&mut JointGraph>,
+) {
+    for mut graph in graphs.iter_mut() {
+        if let Some(edge) = graph.get_mut(entity) {
+            edge.collision_disabled = disabled;
+            return;
         }
     }
 }

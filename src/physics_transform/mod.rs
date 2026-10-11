@@ -211,16 +211,20 @@ pub fn transform_to_position(
         system_tick.this_run()
     };
 
-    let world_entity = world_lookup.any_environment();
-    let Ok(length_unit) = worlds.get(world_entity) else {
-        return;
-    };
-    // If the translation and `Position` differ by less than 0.01 mm, we ignore the change.
-    let distance_tolerance = length_unit.0 * 1e-5;
     // If the rotation and `Rotation` differ by less than 0.1 degrees, we ignore the change.
     let rotation_tolerance = 0.1f32.to_radians();
 
-    for (_entity, transform, child_of, mut position, mut rotation) in &mut query {
+    for (entity, transform, child_of, mut position, mut rotation) in &mut query {
+        // In no environment: not simulated, and no frame to be in.
+        let Some(length_unit) = world_lookup
+            .environment_of(entity)
+            .and_then(|world| worlds.get(world).ok())
+        else {
+            continue;
+        };
+        // If the translation and `Position` differ by less than 0.01 mm, we ignore the change.
+        let distance_tolerance = length_unit.0 * 1e-5;
+
         // Compose transforms up the hierarchy to the PhysicsEnvironment ancestor,
         // staying in f64 to preserve precision at large distances.
         let (composed_translation, composed_rotation) =
@@ -338,7 +342,11 @@ type PosToTransformFilter = (
 type FrameAncestors<'w, 's> = Query<
     'w,
     's,
-    (&'static Transform, Option<&'static ChildOf>, Has<PhysicsEnvironment>),
+    (
+        &'static Transform,
+        Option<&'static ChildOf>,
+        Has<PhysicsEnvironment>,
+    ),
     Without<Position>,
 >;
 

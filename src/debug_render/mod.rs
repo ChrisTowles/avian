@@ -170,7 +170,9 @@ fn debug_render_axes(
     let config = store.config::<PhysicsGizmos>().1;
     for (entity, transform, local_com, sleeping, render_config) in &bodies {
         // Drawn for the body's world: its views show them.
-        let world = lookup.environment_of(entity);
+        let Some(world) = lookup.environment_of(entity) else {
+            continue;
+        };
         let Ok(length_unit) = world_length_unit.get(world) else {
             continue;
         };
@@ -229,7 +231,7 @@ fn debug_render_aabbs(
     let config = store.config::<PhysicsGizmos>().1;
     #[cfg(feature = "2d")]
     for (entity, aabb, collider_rb, render_config) in &aabbs {
-        gizmos.set_owner(Some(lookup.environment_of(entity)));
+        gizmos.set_owner(lookup.environment_of(entity));
         if let Some(mut color) = render_config.map_or(config.aabb_color, |c| c.aabb_color) {
             let collider_rb = collider_rb.map_or(entity, |c| c.body);
 
@@ -249,7 +251,7 @@ fn debug_render_aabbs(
 
     #[cfg(feature = "3d")]
     for (entity, aabb, collider_rb, render_config) in &aabbs {
-        gizmos.set_owner(Some(lookup.environment_of(entity)));
+        gizmos.set_owner(lookup.environment_of(entity));
         if let Some(mut color) = render_config.map_or(config.aabb_color, |c| c.aabb_color) {
             use bevy_shape::Aabb3d;
 
@@ -327,7 +329,7 @@ fn debug_render_colliders(
 ) {
     let config = store.config::<PhysicsGizmos>().1;
     for (entity, collider, transform, collider_rb, render_config) in &mut colliders {
-        gizmos.set_owner(Some(lookup.environment_of(entity)));
+        gizmos.set_owner(lookup.environment_of(entity));
         let position = Position::from(transform);
         let rotation = Rotation::from(transform);
 
@@ -473,7 +475,7 @@ pub fn debug_render_constraint<T: Component + DebugRenderConstraint<N>, const N:
 ) {
     let config = store.config::<PhysicsGizmos>().1;
     for (entity, constraint) in &constraints {
-        gizmos.set_owner(Some(lookup.environment_of(entity)));
+        gizmos.set_owner(lookup.environment_of(entity));
         if let Ok(bodies) = bodies.get_many(constraint.entities()) {
             let positions: [RVector; N] = bodies
                 .iter()
@@ -503,7 +505,9 @@ fn debug_render_raycasts(
 ) {
     let config = store.config::<PhysicsGizmos>().1;
     for (entity, ray, hits) in &query {
-        let world = lookup.environment_of(entity);
+        let Some(world) = lookup.environment_of(entity) else {
+            continue;
+        };
         let Ok(length_unit) = world_length_unit.get(world) else {
             continue;
         };
@@ -540,7 +544,9 @@ fn debug_render_shapecasts(
 ) {
     let config = store.config::<PhysicsGizmos>().1;
     for (entity, shape_caster, hits) in &query {
-        let world = lookup.environment_of(entity);
+        let Some(world) = lookup.environment_of(entity) else {
+            continue;
+        };
         let Ok(length_unit) = world_length_unit.get(world) else {
             continue;
         };
@@ -661,12 +667,11 @@ fn debug_render_tracked_spatial_queries(
     store: Res<GizmoConfigStore>,
     mut queries: ResMut<TrackedSpatialQueries>,
     mut shape_intersections: ResMut<TrackedShapeIntersections>,
-    main_world: Res<MainPhysicsEnvironmentEntity>,
-    length_units: Query<&PhysicsLengthUnit>,
+    length_units: Query<&PhysicsLengthUnit, With<PhysicsEnvironment>>,
 ) {
     let config = store.config::<PhysicsGizmos>().1;
-    // Spatial queries see every world; their markers take the main world's scale.
-    let length_unit = length_units.get(main_world.0).map_or(1.0, |unit| unit.0);
+    // Spatial queries see every environment; their markers take the environments' scale.
+    let length_unit = length_units.iter().next().map_or(1.0, |unit| unit.0);
 
     shape_intersections.clear();
 

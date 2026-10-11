@@ -81,8 +81,9 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             >,
              world_lookup: crate::environment::PhysicsEnvironmentLookup,
              collider_context: StaticSystemParam<C::Context>| {
-                let Ok((narrow_phase_config, length_unit)) =
-                    worlds.get(world_lookup.environment_of(trigger.entity))
+                let Some((narrow_phase_config, length_unit)) = world_lookup
+                    .environment_of(trigger.entity)
+                    .and_then(|world| worlds.get(world).ok())
                 else {
                     return;
                 };
@@ -163,8 +164,9 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             >,
              world_lookup: crate::environment::PhysicsEnvironmentLookup| {
                 let entity = trigger.entity;
-                let Ok((mut trees, mut moved_proxies)) =
-                    worlds.get_mut(world_lookup.environment_of(entity))
+                let Some((mut trees, mut moved_proxies)) = world_lookup
+                    .environment_of(entity)
+                    .and_then(|world| worlds.get_mut(world).ok())
                 else {
                     return;
                 };
@@ -248,8 +250,9 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             >,
              world_lookup: crate::environment::PhysicsEnvironmentLookup| {
                 let entity = trigger.entity;
-                let Ok((mut trees, mut moved_proxies)) =
-                    worlds.get_mut(world_lookup.environment_of(entity))
+                let Some((mut trees, mut moved_proxies)) = world_lookup
+                    .environment_of(entity)
+                    .and_then(|world| worlds.get_mut(world).ok())
                 else {
                     return;
                 };
@@ -321,7 +324,10 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             >,
              world_lookup: crate::environment::PhysicsEnvironmentLookup| {
                 let entity = trigger.entity;
-                let Ok(mut trees) = worlds.get_mut(world_lookup.environment_of(entity)) else {
+                let Some(mut trees) = world_lookup
+                    .environment_of(entity)
+                    .and_then(|world| worlds.get_mut(world).ok())
+                else {
                     return;
                 };
 
@@ -348,7 +354,10 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             >,
              world_lookup: crate::environment::PhysicsEnvironmentLookup| {
                 let entity = trigger.entity;
-                let Ok(mut trees) = worlds.get_mut(world_lookup.environment_of(entity)) else {
+                let Some(mut trees) = world_lookup
+                    .environment_of(entity)
+                    .and_then(|world| worlds.get_mut(world).ok())
+                else {
                     return;
                 };
 
@@ -378,7 +387,10 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             >,
              world_lookup: crate::environment::PhysicsEnvironmentLookup| {
                 let entity = trigger.entity;
-                let Ok(mut trees) = worlds.get_mut(world_lookup.environment_of(entity)) else {
+                let Some(mut trees) = world_lookup
+                    .environment_of(entity)
+                    .and_then(|world| worlds.get_mut(world).ok())
+                else {
                     return;
                 };
 
@@ -408,7 +420,10 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             >,
              world_lookup: crate::environment::PhysicsEnvironmentLookup| {
                 let entity = trigger.entity;
-                let Ok(mut trees) = worlds.get_mut(world_lookup.environment_of(entity)) else {
+                let Some(mut trees) = world_lookup
+                    .environment_of(entity)
+                    .and_then(|world| worlds.get_mut(world).ok())
+                else {
                     return;
                 };
 
@@ -440,7 +455,10 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             >,
              world_lookup: crate::environment::PhysicsEnvironmentLookup| {
                 let entity = trigger.entity;
-                let Ok(mut trees) = worlds.get_mut(world_lookup.environment_of(entity)) else {
+                let Some(mut trees) = world_lookup
+                    .environment_of(entity)
+                    .and_then(|world| worlds.get_mut(world).ok())
+                else {
                     return;
                 };
 
@@ -491,7 +509,9 @@ fn add_to_tree_on<E: EventPattern<Event: EntityEvent>, F: QueryFilter>(
     world_lookup: crate::environment::PhysicsEnvironmentLookup,
 ) {
     let entity = trigger.event_target();
-    let Ok((mut trees, mut moved_proxies)) = worlds.get_mut(world_lookup.environment_of(entity))
+    let Some((mut trees, mut moved_proxies)) = world_lookup
+        .environment_of(entity)
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };
@@ -578,7 +598,9 @@ fn remove_from_tree_on<E: EventPattern<Event: EntityEvent>, F: QueryFilter>(
     world_lookup: crate::environment::PhysicsEnvironmentLookup,
 ) {
     let entity = trigger.event_target();
-    let Ok((mut trees, mut moved_proxies)) = worlds.get_mut(world_lookup.environment_of(entity))
+    let Some((mut trees, mut moved_proxies)) = world_lookup
+        .environment_of(entity)
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };
@@ -842,7 +864,7 @@ fn update_solver_body_aabbs<C: AnyCollider>(
         body_query.par_for_each(
         MIN_PAR_ITER_ENTITIES,
         |(body_entity, rb_pos, center_of_mass, lin_vel, ang_vel, body_colliders, speculative_ccd)| {
-            if world_lookup.environment_of(body_entity) != world_entity {
+            if world_lookup.environment_of(body_entity) != Some(world_entity) {
                 return;
             }
             for collider_entity in body_colliders.iter() {
@@ -1038,7 +1060,7 @@ pub fn update_moved_collider_aabbs<C: AnyCollider>(
                 collision_margin,
                 proxy_key,
             )| {
-                if world_lookup.environment_of(entity) != world_entity {
+                if world_lookup.environment_of(entity) != Some(world_entity) {
                     return;
                 }
                 // Skip if the collider's AABB can't have changed since the last physics tick.

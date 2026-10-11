@@ -448,8 +448,9 @@ fn remove_body_on<E: EventPattern<Event: EntityEvent>>(
     let Ok(colliders) = body_collider_query.get(trigger.event_target()) else {
         return;
     };
-    let Ok((mut contact_graph, mut contact_status_changes)) =
-        worlds.get_mut(world_lookup.environment_of(trigger.event_target()))
+    let Some((mut contact_graph, mut contact_status_changes)) = world_lookup
+        .environment_of(trigger.event_target())
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };
@@ -481,8 +482,9 @@ fn remove_collider_on<E: EventPattern<Event: EntityEvent>>(
     mut message_writer: MessageWriter<CollisionEnd>,
 ) {
     let entity = trigger.event_target();
-    let Ok((mut contact_graph, mut contact_status_changes)) =
-        worlds.get_mut(world_lookup.environment_of(entity))
+    let Some((mut contact_graph, mut contact_status_changes)) = world_lookup
+        .environment_of(entity)
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };
@@ -513,8 +515,9 @@ fn on_body_remove_rigid_body_disabled(
     let Ok(colliders) = body_collider_query.get(trigger.entity) else {
         return;
     };
-    let Ok((mut contact_graph, mut contact_status_changes)) =
-        worlds.get_mut(world_lookup.environment_of(trigger.entity))
+    let Some((mut contact_graph, mut contact_status_changes)) = world_lookup
+        .environment_of(trigger.entity)
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };
@@ -546,8 +549,9 @@ fn on_disable_body(
     let Ok(colliders) = body_collider_query.get(trigger.entity) else {
         return;
     };
-    let Ok((mut contact_graph, mut contact_status_changes)) =
-        worlds.get_mut(world_lookup.environment_of(trigger.entity))
+    let Some((mut contact_graph, mut contact_status_changes)) = world_lookup
+        .environment_of(trigger.entity)
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };
@@ -578,8 +582,9 @@ fn on_add_sensor(
     mut colliding_entities_query: Query<&mut CollidingEntities, Allow<Disabled>>,
     mut message_writer: MessageWriter<CollisionEnd>,
 ) {
-    let Ok((mut contact_graph, mut contact_status_changes)) =
-        worlds.get_mut(world_lookup.environment_of(trigger.entity))
+    let Some((mut contact_graph, mut contact_status_changes)) = world_lookup
+        .environment_of(trigger.entity)
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };
@@ -604,8 +609,9 @@ fn on_remove_sensor(
     mut colliding_entities_query: Query<&mut CollidingEntities, Allow<Disabled>>,
     mut message_writer: MessageWriter<CollisionEnd>,
 ) {
-    let Ok((mut contact_graph, mut contact_status_changes)) =
-        worlds.get_mut(world_lookup.environment_of(trigger.entity))
+    let Some((mut contact_graph, mut contact_status_changes)) = world_lookup
+        .environment_of(trigger.entity)
+        .and_then(|world| worlds.get_mut(world).ok())
     else {
         return;
     };

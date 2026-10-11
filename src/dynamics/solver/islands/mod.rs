@@ -1398,8 +1398,13 @@ impl BodyIslandNode {
 
     // Initialize a new island when `BodyIslandNode` is added to a body.
     fn on_add(mut world: DeferredWorld, ctx: HookContext) {
-        // Create a new island in the body's physics world.
-        let world_entity = crate::environment::find_physics_environment_or_main(&world, ctx.entity);
+        // Create a new island in the body's physics world; a body in none is not simulated.
+        let Some(world_entity) =
+            crate::environment::find_physics_environment_in_hierarchy(&world, ctx.entity)
+        else {
+            crate::environment::report_missing_environment(&world, ctx.entity, "rigid body");
+            return;
+        };
         let mut islands = world.get_mut::<PhysicsIslands>(world_entity).unwrap();
         let island_id = islands.create_island_with(|island| {
             island.head_body = Some(ctx.entity);
@@ -1431,8 +1436,14 @@ impl BodyIslandNode {
         let prev_body_entity = body_island.prev;
         let next_body_entity = body_island.next;
 
-        // Find the body's physics world.
-        let world_entity = crate::environment::find_physics_environment_or_main(&world, ctx.entity);
+        // The body's physics world: the cached one its island was created in (a body that was
+        // in no environment has none, and nothing to unlink).
+        let Some(world_entity) = world
+            .get::<crate::environment::PhysicsEnvironmentEntity>(ctx.entity)
+            .map(|cached| cached.0)
+        else {
+            return;
+        };
 
         // Fix the linked list of bodies in the island.
         if let Some(entity) = prev_body_entity

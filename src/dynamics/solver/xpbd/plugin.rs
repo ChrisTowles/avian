@@ -238,13 +238,10 @@ pub fn warm_start_xpbd_motors<
     mut joints: Query<(&C, &mut C::SolverData), (Without<RigidBody>, Without<JointDisabled>)>,
     time: Res<Time>,
     worlds: Query<&SolverConfig, With<PhysicsEnvironment>>,
-    main_world: Res<MainPhysicsEnvironmentEntity>,
+    world_lookup: crate::environment::PhysicsEnvironmentLookup,
 ) where
     C::SolverData: Component<Mutability = Mutable>,
 {
-    let Ok(solver_config) = worlds.get(main_world.0) else {
-        return;
-    };
     let delta_secs = time.delta_secs();
 
     let access = solver_bodies.access();
@@ -267,6 +264,13 @@ pub fn warm_start_xpbd_motors<
         if index1 == index2 {
             continue;
         }
+        // The joint's environment is its first body's.
+        let Some(solver_config) = world_lookup
+            .environment_of(entity1)
+            .and_then(|world| worlds.get(world).ok())
+        else {
+            continue;
+        };
 
         let (mut body1, mut inertia1) = (&mut dummy_body1, &SolverBodyInertia::DUMMY);
         let (mut body2, mut inertia2) = (&mut dummy_body2, &SolverBodyInertia::DUMMY);
