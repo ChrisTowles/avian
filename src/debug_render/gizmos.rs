@@ -8,7 +8,7 @@ use bevy::prelude::*;
 ))]
 use parry::shape::{SharedShape, TypedShape};
 
-/// An extension trait for `Gizmos<PhysicsGizmo>`.
+/// An extension trait for gizmo buffers: `Gizmos<PhysicsGizmos>` and retained `GizmoAsset`s.
 pub trait PhysicsGizmoExt {
     /// Draws a line from `a` to `b`.
     fn draw_line(&mut self, a: RVector, b: RVector, color: Color);
@@ -85,7 +85,13 @@ pub trait PhysicsGizmoExt {
     );
 }
 
-impl PhysicsGizmoExt for Gizmos<'_, '_, PhysicsGizmos> {
+// On the buffer both `Gizmos` (immediate) and `GizmoAsset` (retained) deref to, so a static
+// collider's lines can be built once into an asset.
+impl<Config, Clear> PhysicsGizmoExt for bevy::gizmos::gizmos::GizmoBuffer<Config, Clear>
+where
+    Config: GizmoConfigGroup,
+    Clear: 'static + Send + Sync,
+{
     /// Draws a line from `a` to `b`.
     fn draw_line(&mut self, a: RVector, b: RVector, color: Color) {
         #[cfg(feature = "2d")]
