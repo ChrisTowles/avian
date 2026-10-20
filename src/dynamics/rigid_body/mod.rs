@@ -281,7 +281,12 @@ use derive_more::From;
     PreSolveDeltaPosition,
     PreSolveDeltaRotation,
 )]
-#[component(immutable, on_add = RigidBody::on_add)]
+#[component(
+    immutable,
+    on_add = RigidBody::on_add,
+    on_insert = RigidBody::on_insert,
+    on_remove = RigidBody::on_remove
+)]
 pub enum RigidBody {
     /// Dynamic bodies are bodies that are affected by forces, velocity and collisions.
     #[default]
@@ -324,7 +329,39 @@ impl RigidBody {
         // Initialize the global physics transform for the rigid body.
         init_physics_transform(&mut world, &ctx);
     }
+
+    // `RigidBody` is immutable, so every change is an insert: the marker follows each one.
+    fn on_insert(mut world: DeferredWorld, ctx: HookContext) {
+        let is_static = world
+            .get::<RigidBody>(ctx.entity)
+            .is_some_and(RigidBody::is_static);
+        let has_marker = world.entity(ctx.entity).contains::<StaticBody>();
+        if is_static != has_marker {
+            let mut commands = world.commands();
+            let mut entity = commands.entity(ctx.entity);
+            if is_static {
+                entity.try_insert(StaticBody);
+            } else {
+                entity.try_remove::<StaticBody>();
+            }
+        }
+    }
+
+    fn on_remove(mut world: DeferredWorld, ctx: HookContext) {
+        if world.entity(ctx.entity).contains::<StaticBody>() {
+            world
+                .commands()
+                .entity(ctx.entity)
+                .try_remove::<StaticBody>();
+        }
+    }
 }
+
+/// Marks a [`RigidBody::Static`] body (kept by `RigidBody`'s hooks), so systems can leave statics
+/// out by archetype instead of reading every body's `RigidBody`.
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component, Debug, Default)]
+pub struct StaticBody;
 
 /// A query filter that selects rigid bodies that are neither disabled nor sleeping.
 pub(crate) type RigidBodyActiveFilter = (Without<RigidBodyDisabled>, Without<Sleeping>);

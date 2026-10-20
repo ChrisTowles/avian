@@ -1,6 +1,6 @@
 use crate::{
     ancestor_marker::{AncestorMarker, AncestorMarkerPlugin},
-    physics_transform::PhysicsTransformSystems,
+    physics_transform::{PhysicsTransformConfig, PhysicsTransformSystems},
     prelude::*,
     utils::{MIN_PAR_ITER_ENTITIES, ParallelQueryForEach},
 };
@@ -47,10 +47,13 @@ impl Plugin for ColliderTransformPlugin {
         app.add_plugins(AncestorMarkerPlugin::<ColliderMarker>::default());
 
         // Propagate `ColliderTransform`s if there are new colliders.
-        // Only traverses trees with `AncestorMarker<ColliderMarker>`.
+        // Only traverses trees with `AncestorMarker<ColliderMarker>`. Under
+        // `PhysicsTransformConfig::hierarchy_moves`, `apply_hierarchy_moves` keeps them instead.
         app.add_systems(
             self.schedule,
-            propagate_collider_transforms.in_set(PhysicsTransformSystems::Propagate),
+            propagate_collider_transforms
+                .in_set(PhysicsTransformSystems::Propagate)
+                .run_if(|config: Res<PhysicsTransformConfig>| !config.hierarchy_moves),
         );
 
         let physics_schedule = app
