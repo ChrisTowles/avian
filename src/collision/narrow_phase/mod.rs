@@ -384,7 +384,7 @@ fn trigger_collision_events(
 /// The constraint graph and island bookkeeping are *not* updated here.
 /// Instead, a [`ContactStatusChange`] is recorded for each touching contact.
 /// This keeps the narrow phase and solver decoupled.
-fn remove_collider(
+pub(crate) fn remove_collider(
     entity: Entity,
     contact_graph: &mut ContactGraph,
     contact_status_changes: &mut ContactStatusChangeQueue,

@@ -9,7 +9,10 @@
 //! simulated. The environment is also the frame: [`Position`] is relative to it.
 
 use bevy::{
-    ecs::{relationship::Relationship, system::SystemParam, world::DeferredWorld},
+    ecs::{
+        entity_disabling::Disabled, relationship::Relationship, system::SystemParam,
+        world::DeferredWorld,
+    },
     prelude::*,
 };
 
@@ -24,7 +27,7 @@ use crate::{
     collision::{
         CollisionDiagnostics,
         narrow_phase::{
-            NarrowPhaseConfig,
+            NarrowPhaseConfig, remove_collider,
             system_param::{ContactStatusBits, ContactStatusChangeQueue},
         },
     },
@@ -256,6 +259,14 @@ struct TransferParams<'w, 's> {
     >,
     bodies: Query<'w, 's, (&'static RigidBody, Has<RigidBodyDisabled>)>,
     body_islands: Query<'w, 's, &'static mut BodyIslandNode>,
+    contact_graphs: Query<
+        'w,
+        's,
+        (&'static mut ContactGraph, &'static mut ContactStatusChangeQueue),
+        With<PhysicsEnvironment>,
+    >,
+    colliding_entities: Query<'w, 's, &'static mut CollidingEntities, Allow<Disabled>>,
+    collision_ends: MessageWriter<'w, CollisionEnd>,
     sleep_timers: Query<'w, 's, &'static mut crate::dynamics::rigid_body::sleeping::SleepTimer>,
     world_cache: Query<'w, 's, &'static mut PhysicsEnvironmentEntity>,
     parents: Query<'w, 's, &'static ChildOf>,
@@ -341,6 +352,9 @@ fn transfer(
         collider_keys,
         bodies,
         body_islands,
+        contact_graphs,
+        colliding_entities,
+        collision_ends,
         sleep_timers,
         world_cache,
         world_state,
@@ -368,8 +382,24 @@ fn transfer(
         .unwrap_or_default();
 
     remove_proxy_from_world(entity, old_world, collider_keys, world_state);
-    for collider in child_colliders_for_remove {
+    for &collider in &child_colliders_for_remove {
         remove_proxy_from_world(collider, old_world, collider_keys, world_state);
+    }
+
+    // Its contact pairs leave the old environment too: left there, the old narrow phase keeps
+    // updating them, and one that starts touching links the body's island id (by then the new
+    // environment's) into the old environment's islands. The queued status changes unlink the
+    // touching ones from the old islands and constraint graph at the next flush.
+    if let Ok((mut contact_graph, mut status_changes)) = contact_graphs.get_mut(old_world) {
+        for collider in core::iter::once(entity).chain(child_colliders_for_remove) {
+            remove_collider(
+                collider,
+                &mut contact_graph,
+                &mut status_changes,
+                colliding_entities,
+                collision_ends,
+            );
+        }
     }
 
     // --- 2. Unlink body from old environment's island ---
