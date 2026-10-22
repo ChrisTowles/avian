@@ -223,6 +223,8 @@ type SyncData = (
 /// user's, and wins over its `Transform`).
 #[derive(SystemParam)]
 pub struct TransformSync<'w, 's> {
+    // Every ancestor, bodies included: a body nested in another (a door in a static building)
+    // sits where both their transforms put it.
     ancestors: Query<
         'w,
         's,
@@ -231,7 +233,6 @@ pub struct TransformSync<'w, 's> {
             Option<&'static ChildOf>,
             Has<PhysicsEnvironment>,
         ),
-        Without<Position>,
     >,
     world_lookup: PhysicsEnvironmentLookup<'w, 's>,
     worlds: Query<'w, 's, &'static PhysicsLengthUnit, With<PhysicsEnvironment>>,
@@ -471,7 +472,7 @@ fn queue_added(
 fn compose_to_physics_world(
     entity_transform: &Transform,
     entity_child_of: Option<&ChildOf>,
-    ancestors: &Query<(&Transform, Option<&ChildOf>, Has<PhysicsEnvironment>), Without<Position>>,
+    ancestors: &Query<(&Transform, Option<&ChildOf>, Has<PhysicsEnvironment>)>,
 ) -> (Vector, Quat) {
     // Start with the entity's own transform.
     #[cfg(feature = "2d")]
@@ -543,8 +544,9 @@ type PosToTransformFilter = (
 );
 
 /// Ancestors whose frame a body's [`Position`] is relative to: everything up to the nearest
-/// [`PhysicsEnvironment`], stopping at one that has a [`Position`] of its own. The same walk
-/// as [`compose_to_physics_world`], so the two directions agree exactly.
+/// [`PhysicsEnvironment`]. The plain ones by their `Transform`; at one with a [`Position`] of its
+/// own (a body this one is nested in), the walk ends on that body's environment pose
+/// ([`BodyFrames`]), which is what its transforms compose to, so the two directions agree.
 type FrameAncestors<'w, 's> = Query<
     'w,
     's,
@@ -556,14 +558,37 @@ type FrameAncestors<'w, 's> = Query<
     Without<Position>,
 >;
 
+/// Ancestor bodies' environment poses (their scale from the propagated transform).
+type BodyFrames<'w, 's> = Query<'w, 's, (&'static Position, &'static Rotation, &'static GlobalTransform)>;
+
 /// The ancestors' transforms a child's [`Position`] composes through, nearest first (the
 /// walk [`compose_to_physics_world`] takes past the child itself).
-fn frame_chain(child_of: Option<&ChildOf>, ancestors: &FrameAncestors, chain: &mut Vec<Transform>) {
+fn frame_chain(
+    child_of: Option<&ChildOf>,
+    ancestors: &FrameAncestors,
+    bodies: &BodyFrames,
+    chain: &mut Vec<Transform>,
+) {
     chain.clear();
     let Some(&ChildOf(mut current)) = child_of else {
         return;
     };
-    while let Ok((transform, child_of, is_physics_world)) = ancestors.get(current) {
+    loop {
+        let Ok((transform, child_of, is_physics_world)) = ancestors.get(current) else {
+            // A body: its pose already carries everything above it.
+            if let Ok((position, rotation, global)) = bodies.get(current) {
+                #[cfg(feature = "2d")]
+                let translation = position.f32().extend(0.0);
+                #[cfg(feature = "3d")]
+                let translation = position.f32();
+                chain.push(
+                    Transform::from_translation(translation)
+                        .with_rotation(Quat::from(*rotation))
+                        .with_scale(global.scale()),
+                );
+            }
+            break;
+        };
         if is_physics_world {
             break;
         }
@@ -587,10 +612,11 @@ fn frame_chain(child_of: Option<&ChildOf>, ancestors: &FrameAncestors, chain: &m
 pub fn position_to_transform(
     mut query: Query<PosToTransformComponents, PosToTransformFilter>,
     ancestors: FrameAncestors,
+    bodies: BodyFrames,
     mut chain: Local<Vec<Transform>>,
 ) {
     for (mut transform, pos, rot, child_of) in &mut query {
-        frame_chain(child_of, &ancestors, &mut chain);
+        frame_chain(child_of, &ancestors, &bodies, &mut chain);
         let mut translation = pos.f32();
         let mut rotation = Quat::from(*rot);
         for parent in chain.iter().rev() {
@@ -617,10 +643,11 @@ pub fn position_to_transform(
 pub fn position_to_transform(
     mut query: Query<PosToTransformComponents, PosToTransformFilter>,
     ancestors: FrameAncestors,
+    bodies: BodyFrames,
     mut chain: Local<Vec<Transform>>,
 ) {
     for (mut transform, pos, rot, child_of) in &mut query {
-        frame_chain(child_of, &ancestors, &mut chain);
+        frame_chain(child_of, &ancestors, &bodies, &mut chain);
         let mut translation = pos.f32();
         let mut rotation = rot.0;
         for parent in chain.iter().rev() {
