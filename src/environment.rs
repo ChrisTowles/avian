@@ -101,10 +101,12 @@ pub struct PhysicsEnvironment;
 /// A cached reference to the [`PhysicsEnvironment`] entity that a physics entity belongs to.
 ///
 /// This is populated automatically by walking the hierarchy on spawn (via the
-/// [`BodyIslandNode`] `on_add` hook) and updated directly by [`TransferToEnvironment`].
+/// [`BodyIslandNode`] `on_add` hook for dynamic and kinematic bodies, and [`ColliderOf`]'s insert
+/// hook for every collider, statics' included) and updated directly by [`TransferToEnvironment`].
 ///
-/// [`PhysicsEnvironmentLookup`] reads this cache for O(1) lookup instead of
-/// walking the [`ChildOf`] hierarchy every frame.
+/// [`PhysicsEnvironmentLookup`] reads this cache for O(1) lookup instead of walking the
+/// [`ChildOf`] hierarchy every frame, and removal relies on it: a recursive despawn removes a
+/// collider after its ancestors are gone, when the hierarchy no longer leads anywhere.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Reflect)]
 #[reflect(Component)]
 pub struct PhysicsEnvironmentEntity(pub Entity);
@@ -121,7 +123,8 @@ pub fn find_physics_environment_in_hierarchy(
     world: &DeferredWorld,
     entity: Entity,
 ) -> Option<Entity> {
-    // Fast path: cached environment assignment (set by BodyIslandNode::on_add and TransferToEnvironment).
+    // Fast path: cached environment assignment (set by BodyIslandNode::on_add, ColliderOf's insert
+    // hook and TransferToEnvironment).
     if let Some(cached) = world.get::<PhysicsEnvironmentEntity>(entity) {
         return Some(cached.0);
     }
@@ -132,6 +135,20 @@ pub fn find_physics_environment_in_hierarchy(
             return Some(current);
         }
         current = world.get::<ChildOf>(current)?.get();
+    }
+}
+
+/// Sets `entity`'s [`PhysicsEnvironmentEntity`] cache to `environment`. Works in hooks.
+pub(crate) fn cache_environment(world: &mut DeferredWorld, entity: Entity, environment: Entity) {
+    if let Some(mut cached) = world.get_mut::<PhysicsEnvironmentEntity>(entity) {
+        if cached.0 != environment {
+            cached.0 = environment;
+        }
+    } else {
+        world
+            .commands()
+            .entity(entity)
+            .try_insert(PhysicsEnvironmentEntity(environment));
     }
 }
 
@@ -258,11 +275,15 @@ struct TransferParams<'w, 's> {
         ),
     >,
     bodies: Query<'w, 's, (&'static RigidBody, Has<RigidBodyDisabled>)>,
+    body_colliders: Query<'w, 's, &'static RigidBodyColliders>,
     body_islands: Query<'w, 's, &'static mut BodyIslandNode>,
     contact_graphs: Query<
         'w,
         's,
-        (&'static mut ContactGraph, &'static mut ContactStatusChangeQueue),
+        (
+            &'static mut ContactGraph,
+            &'static mut ContactStatusChangeQueue,
+        ),
         With<PhysicsEnvironment>,
     >,
     colliding_entities: Query<'w, 's, &'static mut CollidingEntities, Allow<Disabled>>,
@@ -351,6 +372,7 @@ fn transfer(
     let TransferParams {
         collider_keys,
         bodies,
+        body_colliders,
         body_islands,
         contact_graphs,
         colliding_entities,
@@ -368,30 +390,39 @@ fn transfer(
         return; // Already in the target world.
     }
 
-    // Update the cached environment assignment immediately.
-    if let Ok(mut cached) = world_cache.get_mut(entity) {
-        cached.0 = target_world;
-    }
 
     // --- 1. Remove collider proxy from old environment's tree ---
-    // Collect child collider entities to avoid borrow conflicts.
-    let child_colliders_for_remove: Vec<Entity> = collider_keys
+    // The entity and its body's colliders, each once (its own collider is in `RigidBodyColliders`
+    // too: added twice, one proxy was orphaned), even when the body has no collider of its own.
+    let mut colliders: Vec<Entity> = body_colliders
         .get(entity)
-        .ok()
-        .and_then(|(_, body_colliders, ..)| body_colliders.map(|c| c.iter().collect()))
+        .map(|c| c.iter().collect())
         .unwrap_or_default();
-
-    remove_proxy_from_world(entity, old_world, collider_keys, world_state);
-    for &collider in &child_colliders_for_remove {
-        remove_proxy_from_world(collider, old_world, collider_keys, world_state);
+    if !colliders.contains(&entity) {
+        colliders.insert(0, entity);
     }
+
+    // Update the cached environment assignment immediately: the body's and its colliders'.
+    for &e in &colliders {
+        if let Ok(mut cached) = world_cache.get_mut(e) {
+            cached.0 = target_world;
+        }
+    }
+
+    let placed: Vec<Entity> = colliders
+        .iter()
+        .copied()
+        .filter(|&collider| {
+            remove_proxy_from_world(collider, old_world, collider_keys, world_state)
+        })
+        .collect();
 
     // Its contact pairs leave the old environment too: left there, the old narrow phase keeps
     // updating them, and one that starts touching links the body's island id (by then the new
     // environment's) into the old environment's islands. The queued status changes unlink the
     // touching ones from the old islands and constraint graph at the next flush.
     if let Ok((mut contact_graph, mut status_changes)) = contact_graphs.get_mut(old_world) {
-        for collider in core::iter::once(entity).chain(child_colliders_for_remove) {
+        for &collider in &colliders {
             remove_collider(
                 collider,
                 &mut contact_graph,
@@ -465,15 +496,7 @@ fn transfer(
     }
 
     // --- 5. Add collider proxy to new environment's tree (direct) ---
-    // Collect child collider entities first to avoid borrow conflicts.
-    let child_colliders: Vec<Entity> = collider_keys
-        .get(entity)
-        .ok()
-        .and_then(|(_, body_colliders, ..)| body_colliders.map(|c| c.iter().collect()))
-        .unwrap_or_default();
-
-    add_proxy_to_world(entity, target_world, collider_keys, bodies, world_state);
-    for collider in child_colliders {
+    for collider in placed {
         add_proxy_to_world(collider, target_world, collider_keys, bodies, world_state);
     }
 
@@ -549,7 +572,8 @@ fn transfer(
     });
 }
 
-/// Removes an entity's collider proxy from an environment's [`ColliderTrees`].
+/// Removes an entity's collider proxy from an environment's [`ColliderTrees`] and clears its key;
+/// `false` when it had none to move.
 #[allow(clippy::type_complexity)]
 fn remove_proxy_from_world(
     entity: Entity,
@@ -573,19 +597,21 @@ fn remove_proxy_from_world(
         ),
         With<PhysicsEnvironment>,
     >,
-) {
-    let Ok((proxy_key, ..)) = collider_keys.get(entity) else {
-        return;
+) -> bool {
+    let Ok((mut proxy_key, ..)) = collider_keys.get_mut(entity) else {
+        return false;
     };
-    if *proxy_key == ColliderTreeProxyKey::PLACEHOLDER {
-        return;
+    let key = core::mem::replace(&mut *proxy_key, ColliderTreeProxyKey::PLACEHOLDER);
+    if key == ColliderTreeProxyKey::PLACEHOLDER {
+        return false;
     }
-    let Ok((mut trees, mut moved_proxies, _, _)) = world_state.get_mut(world_entity) else {
-        return;
-    };
-    let tree = trees.tree_for_type_mut(proxy_key.tree_type());
-    tree.remove_proxy(proxy_key.id());
-    moved_proxies.remove(proxy_key);
+    if let Ok((mut trees, mut moved_proxies, _, _)) = world_state.get_mut(world_entity) {
+        trees
+            .tree_for_type_mut(key.tree_type())
+            .remove_proxy(key.id());
+        moved_proxies.remove(&key);
+    }
+    true
 }
 
 /// Adds an entity's collider proxy to an environment's [`ColliderTrees`].

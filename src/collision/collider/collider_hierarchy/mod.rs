@@ -92,6 +92,18 @@ impl Relationship for ColliderOf {
 
         let &ColliderOf { body } = collider_ref.get::<ColliderOf>().unwrap();
 
+        // Cache the collider's environment while its hierarchy is whole: a recursive despawn
+        // removes it after its ancestors are gone, and its removal (tree proxy, contacts) must
+        // still find the environment.
+        if let Some(environment) =
+            crate::environment::find_physics_environment_in_hierarchy(&world, body).or_else(|| {
+                crate::environment::find_physics_environment_in_hierarchy(&world, entity)
+            })
+        {
+            crate::environment::cache_environment(&mut world, entity, environment);
+        }
+        let collider_ref = world.entity(entity);
+
         // Get the global transform of the collider and its rigid body.
         let Some(collider_global_transform) = collider_ref.get::<GlobalTransform>() else {
             return;
