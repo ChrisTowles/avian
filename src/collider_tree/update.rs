@@ -1060,15 +1060,17 @@ pub fn update_moved_collider_aabbs<C: AnyCollider>(
                 collision_margin,
                 proxy_key,
             )| {
-                if world_lookup.environment_of(entity) != Some(world_entity) {
-                    return;
-                }
                 // Skip if the collider's AABB can't have changed since the last physics tick.
+                // Checked before the environment: this runs once per environment over every
+                // collider, nearly all of them still, and the change ticks are the cheaper test.
                 let collider_changed = collider.last_changed().is_newer_than(last_tick.0, this_run);
                 if !pos.last_changed().is_newer_than(last_tick.0, this_run)
                     && !rot.last_changed().is_newer_than(last_tick.0, this_run)
                     && !collider_changed
                 {
+                    return;
+                }
+                if world_lookup.environment_of(entity) != Some(world_entity) {
                     return;
                 }
 
