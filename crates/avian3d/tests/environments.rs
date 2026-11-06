@@ -143,3 +143,43 @@ fn despawned_prop_leaves_no_collider() {
     let now = app.world().get::<Position>(crate_).unwrap().y;
     assert!(now < rest - 1.0, "the crate falls where the prop was: {rest} -> {now}");
 }
+
+/// A parent rotation that is not exactly unit (a scene file written to four decimals has norm
+/// 1.00005) must not make a static child drift: the Transform -> Position -> Transform round trip
+/// inverts the parent's rotation, and `Quat::inverse` is only the conjugate, so each pass gained
+/// the quaternion's squared norm and a placed building's pieces climbed every physics step.
+#[test]
+fn non_unit_parent_rotation_does_not_drift_a_static_child() {
+    let mut app = app();
+    let env = environment(&mut app);
+    let prop = app
+        .world_mut()
+        .spawn((
+            Transform {
+                translation: Vec3::new(-25.0, 0.0, 24.0),
+                rotation: Quat::from_xyzw(0.0, 0.9239, 0.0, 0.3827),
+                scale: Vec3::splat(0.6),
+            },
+            ChildOf(env),
+        ))
+        .id();
+    assert!((app.world().get::<Transform>(prop).unwrap().rotation.length() - 1.0).abs() > 1e-5);
+    let local = Vec3::new(0.02, 15.7, -0.23);
+    let child = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Transform::from_translation(local),
+            ChildOf(prop),
+        ))
+        .id();
+    step(&mut app, 240);
+    let now = app.world().get::<Transform>(child).unwrap();
+    assert!(
+        now.translation.distance(local) < 1e-3,
+        "the child drifted from {local} to {} in 240 steps",
+        now.translation
+    );
+    assert!((now.rotation.length() - 1.0).abs() < 1e-4, "rotation norm {}", now.rotation.length());
+}

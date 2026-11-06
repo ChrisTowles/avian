@@ -497,7 +497,10 @@ fn compose_to_physics_world(
             break;
         }
         // Compose: position_in_parent_space = parent_transform * child_position
-        let parent_rot: Quat = parent_transform.rotation;
+        // Normalised: a rotation that is off unit length (a scene written to four decimals)
+        // would scale every child by its squared norm here and by a different factor in
+        // `position_to_transform`, so a static child would drift farther out each step.
+        let parent_rot: Quat = parent_transform.rotation.normalize();
         #[cfg(feature = "2d")]
         {
             let parent_translation = parent_transform.translation.truncate();
@@ -620,7 +623,7 @@ pub fn position_to_transform(
         let mut translation = pos.f32();
         let mut rotation = Quat::from(*rot);
         for parent in chain.iter().rev() {
-            let inv = parent.rotation.inverse();
+            let inv = parent.rotation.normalize().inverse();
             translation = (inv * (translation - parent.translation.truncate()).extend(0.0))
                 .truncate()
                 / parent.scale.truncate();
@@ -651,7 +654,7 @@ pub fn position_to_transform(
         let mut translation = pos.f32();
         let mut rotation = rot.0;
         for parent in chain.iter().rev() {
-            let inv = parent.rotation.inverse();
+            let inv = parent.rotation.normalize().inverse();
             translation = (inv * (translation - parent.translation)) / parent.scale;
             rotation = inv * rotation;
         }
