@@ -1,5 +1,6 @@
 use avian3d::collider_tree::ColliderTrees;
 use avian3d::environment::{PhysicsEnvironment, TransferToEnvironment};
+use avian3d::physics_transform::{HierarchyMoves, PhysicsTransformConfig};
 use avian3d::prelude::*;
 use bevy::{prelude::*, time::TimeUpdateStrategy};
 use core::time::Duration;
@@ -142,4 +143,165 @@ fn despawned_prop_leaves_no_collider() {
     assert_eq!(proxies_of(&app, env, collider), 0, "the prop's proxy is gone");
     let now = app.world().get::<Position>(crate_).unwrap().y;
     assert!(now < rest - 1.0, "the crate falls where the prop was: {rest} -> {now}");
+}
+
+/// A parent rotation that is not exactly unit (a scene file written to four decimals has norm
+/// 1.00005) must not make a static child drift: the Transform -> Position -> Transform round trip
+/// inverts the parent's rotation, and `Quat::inverse` is only the conjugate, so each pass gained
+/// the quaternion's squared norm and a placed building's pieces climbed every physics step.
+#[test]
+fn non_unit_parent_rotation_does_not_drift_a_static_child() {
+    let mut app = app();
+    let env = environment(&mut app);
+    let prop = app
+        .world_mut()
+        .spawn((
+            Transform {
+                translation: Vec3::new(-25.0, 0.0, 24.0),
+                rotation: Quat::from_xyzw(0.0, 0.9239, 0.0, 0.3827),
+                scale: Vec3::splat(0.6),
+            },
+            ChildOf(env),
+        ))
+        .id();
+    assert!((app.world().get::<Transform>(prop).unwrap().rotation.length() - 1.0).abs() > 1e-5);
+    let local = Vec3::new(0.02, 15.7, -0.23);
+    let child = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Transform::from_translation(local),
+            ChildOf(prop),
+        ))
+        .id();
+    step(&mut app, 240);
+    let now = app.world().get::<Transform>(child).unwrap();
+    assert!(
+        now.translation.distance(local) < 1e-3,
+        "the child drifted from {local} to {} in 240 steps",
+        now.translation
+    );
+    assert!((now.rotation.length() - 1.0).abs() < 1e-4, "rotation norm {}", now.rotation.length());
+}
+
+/// Frames, of `frames` after ten to settle in, in which `collider`'s bounds changed.
+fn restless_frames(app: &mut App, collider: Entity, frames: usize) -> usize {
+    let changed_at = |app: &mut App| {
+        app.world_mut()
+            .run_system_cached_with(
+                |In(e): In<Entity>, aabbs: Query<Ref<ColliderAabb>>| {
+                    aabbs.get(e).unwrap().last_changed().get()
+                },
+                collider,
+            )
+            .unwrap()
+    };
+    step(app, 10);
+    let mut last = changed_at(app);
+    let mut moved = 0;
+    for _ in 0..frames {
+        app.update();
+        let now = changed_at(app);
+        if now != last {
+            moved += 1;
+        }
+        last = now;
+    }
+    moved
+}
+
+/// A host's stand-in: lists each entity whose `Transform` changed value since the last step.
+fn list_moves(
+    transforms: Query<(Entity, Ref<Transform>)>,
+    mut last: Local<bevy::platform::collections::HashMap<Entity, Transform>>,
+    mut moves: ResMut<HierarchyMoves>,
+) {
+    for (entity, transform) in &transforms {
+        if !transform.is_changed() {
+            continue;
+        }
+        if last.insert(entity, *transform) != Some(*transform) {
+            moves.0.push(entity);
+        }
+    }
+}
+
+/// A static collider under a placement whose rotation is not exactly unit (home's, written to four
+/// decimals, 0.7071: norm 0.99998; or a baked tilt whose f32 rounding lands a hair under 1, one of
+/// Northshire's nineteen kobold buckets) must come to rest, its `Transform` untouched. Transform -> Position -> Transform did not round-trip: the `Rotation` took the
+/// non-unit product, `angle_between` (which assumes unit quaternions) read 1.4 degrees between it
+/// and the same value, so it was written every step, and `position_to_transform` wrote the
+/// collider's `Transform` back off by the squared norm, which the host saw move. Its bounds
+/// changed every frame for good (zero's home: the armory case and five bottles; Northshire: a
+/// kobold bucket), and a place with such a collider never rests.
+// The case's rotation is written to four decimals on purpose, not FRAC_1_SQRT_2.
+#[allow(clippy::approx_constant)]
+fn static_child_rests(hierarchy_moves: bool) {
+    for (what, tile, placed, rotation) in [
+        (
+            "home's armory case",
+            Vec3::ZERO,
+            Vec3::new(-11.67, 0.01, -1.6),
+            Quat::from_xyzw(0.0, 0.7071, 0.0, 0.7071),
+        ),
+        (
+            "Northshire's kobold bucket",
+            Vec3::new(487.68, -75.1436, -487.68),
+            Vec3::new(-162.28307, 52.602055, -151.13853),
+            Quat::from_xyzw(0.085643716, 0.7952278, 0.11106394, 0.58986646),
+        ),
+    ] {
+        let mut app = app();
+        if hierarchy_moves {
+            app.insert_resource(PhysicsTransformConfig {
+                propagate_before_physics: false,
+                hierarchy_moves: true,
+                ..default()
+            })
+            .add_systems(FixedPostUpdate, list_moves.before(PhysicsSystems::First));
+        }
+        let env = environment(&mut app);
+        let tile = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(tile),
+                ChildOf(env),
+            ))
+            .id();
+        let prop = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(placed).with_rotation(rotation),
+                ChildOf(tile),
+            ))
+            .id();
+        let collider = app
+            .world_mut()
+            .spawn((
+                RigidBody::Static,
+                Collider::cuboid(0.6, 0.7, 0.6),
+                Transform::default(),
+                ChildOf(prop),
+            ))
+            .id();
+        let moved = restless_frames(&mut app, collider, 120);
+        let local = *app.world().get::<Transform>(collider).unwrap();
+        assert_eq!(
+            moved, 0,
+            "{what} (hierarchy_moves {hierarchy_moves}): its bounds changed in {moved} of 120 \
+             frames; its Transform is now {local:?}"
+        );
+        assert_eq!(local, Transform::default(), "{what}: its Transform was rewritten");
+    }
+}
+
+#[test]
+fn static_child_of_a_non_unit_rotation_rests() {
+    static_child_rests(false);
+}
+
+#[test]
+fn static_child_of_a_non_unit_rotation_rests_with_hierarchy_moves() {
+    static_child_rests(true);
 }

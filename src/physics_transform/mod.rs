@@ -283,24 +283,34 @@ impl TransformSync<'_, '_> {
         let transform_translation = composed_translation;
         let transform_rotation = Rotation::from(composed_rotation);
 
-        let position_changed = !position.is_added()
+        // A pose added since (from the spawn's `GlobalTransform`, not yet propagated or composed
+        // another way) takes the composed one exactly, tolerances aside: one left within them
+        // (a few 1e-5 radians off under a turned parent) is a pose `position_to_transform` would
+        // write back as a change to the `Transform`.
+        let position_added = position.is_added();
+        let position_changed = !position_added
             && is_changed_after_tick(
                 Ref::from(position.reborrow()),
                 self.last_physics_tick.0,
                 this_run,
             );
-        if !position_changed && position.abs_diff_ne(&transform_translation, distance_tolerance) {
+        if position_added
+            || !position_changed
+                && position.abs_diff_ne(&transform_translation, distance_tolerance)
+        {
             position.0 = transform_translation;
         }
 
-        let rotation_changed = !rotation.is_added()
+        let rotation_added = rotation.is_added();
+        let rotation_changed = !rotation_added
             && is_changed_after_tick(
                 Ref::from(rotation.reborrow()),
                 self.last_physics_tick.0,
                 this_run,
             );
-        if !rotation_changed
-            && rotation.angle_between(transform_rotation).abs() > rotation_tolerance
+        if rotation_added
+            || !rotation_changed
+                && rotation.angle_between(transform_rotation).abs() > rotation_tolerance
         {
             *rotation = transform_rotation;
         }
@@ -483,7 +493,7 @@ fn compose_to_physics_world(
 
     // Walk up to the PhysicsEnvironment, composing ancestor transforms.
     let Some(&ChildOf(mut current_parent)) = entity_child_of else {
-        return (translation, rotation);
+        return (translation, rotation.normalize());
     };
 
     loop {
@@ -497,7 +507,10 @@ fn compose_to_physics_world(
             break;
         }
         // Compose: position_in_parent_space = parent_transform * child_position
-        let parent_rot: Quat = parent_transform.rotation;
+        // Normalised: a rotation that is off unit length (a scene written to four decimals)
+        // would scale every child by its squared norm here and by a different factor in
+        // `position_to_transform`, so a static child would drift farther out each step.
+        let parent_rot: Quat = parent_transform.rotation.normalize();
         #[cfg(feature = "2d")]
         {
             let parent_translation = parent_transform.translation.truncate();
@@ -520,7 +533,10 @@ fn compose_to_physics_world(
         }
     }
 
-    (translation, rotation)
+    // `Rotation` is a unit quaternion: one composed from a rotation written to four decimals
+    // (norm 0.99998) read 1.4 degrees from itself in `angle_between`, which assumes unit
+    // quaternions, so it was written again every time it was composed.
+    (translation, rotation.normalize())
 }
 
 /// Marker component indicating that the `position_to_transform` system should be applied
@@ -532,6 +548,7 @@ fn compose_to_physics_world(
 pub struct ApplyPosToTransform;
 
 type PosToTransformComponents = (
+    Entity,
     &'static mut Transform,
     &'static Position,
     &'static Rotation,
@@ -613,14 +630,21 @@ pub fn position_to_transform(
     mut query: Query<PosToTransformComponents, PosToTransformFilter>,
     ancestors: FrameAncestors,
     bodies: BodyFrames,
+    tolerance: WritebackTolerance,
     mut chain: Local<Vec<Transform>>,
 ) {
-    for (mut transform, pos, rot, child_of) in &mut query {
+    for (entity, mut transform, pos, rot, child_of) in &mut query {
         frame_chain(child_of, &ancestors, &bodies, &mut chain);
         let mut translation = pos.f32();
         let mut rotation = Quat::from(*rot);
+        let (composed, composed_rotation) = compose_chain(&transform, &chain);
+        if composed.truncate().distance(translation) <= tolerance.distance(entity)
+            && same_rotation(composed_rotation, rotation)
+        {
+            continue;
+        }
         for parent in chain.iter().rev() {
-            let inv = parent.rotation.inverse();
+            let inv = parent.rotation.normalize().inverse();
             translation = (inv * (translation - parent.translation.truncate()).extend(0.0))
                 .truncate()
                 / parent.scale.truncate();
@@ -644,18 +668,78 @@ pub fn position_to_transform(
     mut query: Query<PosToTransformComponents, PosToTransformFilter>,
     ancestors: FrameAncestors,
     bodies: BodyFrames,
+    tolerance: WritebackTolerance,
     mut chain: Local<Vec<Transform>>,
 ) {
-    for (mut transform, pos, rot, child_of) in &mut query {
+    for (entity, mut transform, pos, rot, child_of) in &mut query {
         frame_chain(child_of, &ancestors, &bodies, &mut chain);
-        let mut translation = pos.f32();
-        let mut rotation = rot.0;
-        for parent in chain.iter().rev() {
-            let inv = parent.rotation.inverse();
-            translation = (inv * (translation - parent.translation)) / parent.scale;
-            rotation = inv * rotation;
+        let (position, rotation) = (pos.f32(), rot.0);
+        let (composed, composed_rotation) = compose_chain(&transform, &chain);
+        if composed.distance(position) <= tolerance.distance(entity)
+            && same_rotation(composed_rotation, rotation)
+        {
+            continue;
         }
+        let (translation, rotation) = local_of(&chain, position, rotation);
         transform.translation = translation;
         transform.rotation = rotation;
     }
+}
+
+/// How far a [`Transform`] may compose from its body's [`Position`] and still be its pose: the
+/// distance [`transform_to_position`] ignores (0.01 mm at a length unit of 1), so neither
+/// direction moves what the other would not.
+#[derive(SystemParam)]
+pub struct WritebackTolerance<'w, 's> {
+    world_lookup: PhysicsEnvironmentLookup<'w, 's>,
+    worlds: Query<'w, 's, &'static PhysicsLengthUnit, With<PhysicsEnvironment>>,
+}
+
+impl WritebackTolerance<'_, '_> {
+    #[allow(clippy::unnecessary_cast)]
+    fn distance(&self, entity: Entity) -> f32 {
+        self.world_lookup
+            .environment_of(entity)
+            .and_then(|world| self.worlds.get(world).ok())
+            .map_or(0.0, |unit| (unit.0 * 1e-5) as f32)
+    }
+}
+
+/// A unit rotation's components may differ by this and still be the same rotation: a few f32
+/// roundings through a hierarchy, about 0.0001 degrees.
+const ROTATION_EPSILON: f32 = 1e-6;
+
+/// `transform` under `chain` (its ancestors as [`frame_chain`] gives them, nearest first),
+/// composed as [`compose_to_physics_world`] composes it. [`position_to_transform`] writes nothing
+/// when this is already its body's pose: a static collider's `Transform`, rewritten from the
+/// `Position` it had just been composed to, came back off by f32 rounding (0.1 mm 17 km out) or
+/// by a parent rotation's squared norm, the host saw it move, and it was composed and written
+/// back again every step, its bounds never at rest.
+fn compose_chain(transform: &Transform, chain: &[Transform]) -> (Vec3, Quat) {
+    let (mut translation, mut rotation) = (transform.translation, transform.rotation);
+    for parent in chain {
+        let parent_rot = parent.rotation.normalize();
+        translation = parent_rot * (parent.scale * translation) + parent.translation;
+        rotation = parent_rot * rotation;
+    }
+    (translation, rotation)
+}
+
+/// Whether two rotations, either off unit length, are the same within [`ROTATION_EPSILON`].
+fn same_rotation(a: Quat, b: Quat) -> bool {
+    let (a, b) = (a.normalize(), b.normalize());
+    a.abs_diff_eq(b, ROTATION_EPSILON) || a.abs_diff_eq(-b, ROTATION_EPSILON)
+}
+
+#[cfg(feature = "3d")]
+/// `position` and `rotation` in the frame of `chain` (nearest ancestor first): the ancestors
+/// undone from the outermost in, the inverse of [`compose_to_physics_world`].
+fn local_of(chain: &[Transform], position: Vec3, rotation: Quat) -> (Vec3, Quat) {
+    let (mut translation, mut rotation) = (position, rotation);
+    for parent in chain.iter().rev() {
+        let inv = parent.rotation.normalize().inverse();
+        translation = (inv * (translation - parent.translation)) / parent.scale;
+        rotation = inv * rotation;
+    }
+    (translation, rotation)
 }
