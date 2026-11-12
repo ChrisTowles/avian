@@ -5,7 +5,7 @@
 use bevy::app::RunFixedMainLoopSystems;
 use bevy::{ecs::query::QueryData, prelude::*};
 use bevy_transform_interpolation::{
-    VelocitySource, prelude::*, reset_easing_states_on_transform_change,
+    TransformEasingPlugin, VelocitySource, prelude::*, reset_easing_states_on_transform_change,
 };
 
 #[expect(deprecated)]
@@ -298,7 +298,12 @@ impl Plugin for PhysicsInterpolationPlugin {
         // drops must be dropped before the fixed ticks: bevy_transform_interpolation orders
         // its reset only before the easing, which runs after the ticks, so on a frame that
         // ticks `complete_translation_easing` writes the old easing's end back over the
-        // teleport and the body shows one tick at the old place.
+        // teleport and the body shows one tick at the old place. The reset reads the easing
+        // plugin's `LastEasingTick`, and the interpolation plugins add that plugin only in
+        // `finish`: it is added here, so an app updated without `finish` (a test's) has it.
+        if !app.is_plugin_added::<TransformEasingPlugin>() {
+            app.add_plugins(TransformEasingPlugin);
+        }
         app.add_systems(
             RunFixedMainLoop,
             reset_easing_states_on_transform_change
